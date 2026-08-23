@@ -1,0 +1,61 @@
+name: Rakenna ja julkaise
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      WIN_START: 14400
+      WIN_END: 43200
+      WEEKDAY: 3
+      FOOT_M: 400
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Lataa HSL GTFS
+        run: |
+          mkdir -p tmp/hsl
+          curl -sSfL --retry 3 --retry-delay 5 -o tmp/hsl.zip https://infopalvelut.storage.hsldev.com/gtfs/hsl.zip
+          ls -lh tmp/hsl.zip
+          unzip -oq tmp/hsl.zip -d tmp/hsl
+          ls -lh tmp/hsl
+
+      - name: Rakenna datapaketti
+        run: node --max-old-space-size=6144 tools/build-data.mjs tmp/hsl web/data hsl
+
+      - name: Tarkista tulos
+        run: |
+          ls -lh web/data
+          test -s web/data/conn_dep.bin
+          test -s web/data/stops.json
+          du -sh web/data
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
