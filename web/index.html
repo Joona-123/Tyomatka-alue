@@ -21,7 +21,8 @@
     background:linear-gradient(180deg,rgba(15,26,30,.92),rgba(15,26,30,0));
     pointer-events:none}
   #title h1{margin:0;font-size:15px;font-weight:650;letter-spacing:-.01em}
-  #title p{margin:2px 0 0;font-size:11.5px;color:var(--muted)}
+  #title p{margin:3px 0 0;font-size:12px;color:#B7C9CD;text-shadow:0 1px 3px rgba(0,0,0,.9)}
+  #title p b{color:var(--edge)}
 
   #panel{position:absolute;left:0;right:0;bottom:0;z-index:3;background:var(--panel);
     border-top:1px solid var(--line);padding:10px 14px calc(12px + env(safe-area-inset-bottom));
@@ -47,6 +48,25 @@
   .legcap{display:flex;justify-content:space-between;font-family:var(--mono);
     font-size:10px;color:var(--muted)}
 
+  #modes{display:flex;gap:6px}
+  #modes button{flex:1;padding:8px;border-radius:6px;border:1px solid var(--line);
+    background:#16262B;color:var(--muted);font-size:13px;cursor:pointer}
+  #modes button[aria-pressed=true]{background:var(--accent);color:#0B1417;border-color:var(--accent);font-weight:600}
+
+  #trip{margin:0 0 12px}
+  #trip:empty{display:none}
+  .thead{display:flex;justify-content:space-between;align-items:baseline;
+    border-top:1px solid var(--line);padding-top:9px;margin-bottom:7px}
+  .thead .t{font-family:var(--mono);font-size:19px;color:var(--edge)}
+  .thead .s{font-size:11px;color:var(--muted)}
+  .leg{display:flex;gap:9px;align-items:flex-start;padding:4px 0;font-size:12.5px}
+  .leg .tm{font-family:var(--mono);font-size:12px;color:var(--muted);min-width:38px;padding-top:2px}
+  .leg .pill{font-family:var(--mono);font-size:12px;font-weight:700;color:#0B1417;
+    background:var(--accent);border-radius:4px;padding:2px 7px;min-width:34px;text-align:center}
+  .leg .pill.walk{background:transparent;color:var(--muted);border:1px dashed var(--line);font-weight:400}
+  .leg .d{flex:1;line-height:1.35}
+  .leg .d small{color:var(--muted)}
+
   #status{font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.5;
     border-top:1px solid var(--line);padding-top:8px;margin-top:2px}
   #status b{color:var(--accent);font-weight:600}
@@ -60,7 +80,7 @@
 
 <div id="title">
   <h1>Työmatka-alue</h1>
-  <p id="hint">Napauta karttaa merkitäksesi työpaikan.</p>
+  <p id="hint">Napauta karttaa: <b>työpaikka</b></p>
 </div>
 
 <div id="panel">
@@ -85,6 +105,16 @@
     <div class="lbl"><span>Pisin kävely yhteen suuntaan</span><span class="val" id="vWalk">15 min</span></div>
     <input type="range" id="walk" min="5" max="30" step="1" value="15">
   </div>
+
+  <div class="grp" id="modeRow" style="display:none">
+    <div class="lbl"><span>Napautus asettaa</span></div>
+    <div id="modes">
+      <button id="mWork" type="button">Työpaikan</button>
+      <button id="mHome" type="button" aria-pressed="true">Kodin</button>
+    </div>
+  </div>
+
+  <div id="trip"></div>
 
   <div id="status">Ladataan aikataulutietoja…</div>
 </div>
@@ -128,7 +158,34 @@ map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-ri
 
 let marker = null, work = null, meta = null, ready = false, pending = false;
 
-map.on('click', e => { setWork(e.lngLat.lat, e.lngLat.lng); });
+let mode = 'work', home = null, homeMarker = null;
+
+map.on('click', e => {
+  if (mode === 'work') setWork(e.lngLat.lat, e.lngLat.lng);
+  else setHome(e.lngLat.lat, e.lngLat.lng);
+});
+
+function setMode(m) {
+  mode = m;
+  $('#mWork').setAttribute('aria-pressed', String(m === 'work'));
+  $('#mHome').setAttribute('aria-pressed', String(m === 'home'));
+  $('#hint').innerHTML = m === 'work'
+    ? 'Napauta karttaa: <b>työpaikka</b>'
+    : 'Napauta aluetta: <b>paras matkavaihtoehto</b>';
+}
+$('#mWork').onclick = () => setMode('work');
+$('#mHome').onclick = () => setMode('home');
+
+function setHome(lat, lon) {
+  home = { lat, lon };
+  if (!homeMarker) {
+    const el = document.createElement('div');
+    el.style.cssText = 'width:13px;height:13px;border-radius:3px;background:#5FD3C4;' +
+      'border:2.5px solid #0F1A1E;transform:rotate(45deg)';
+    homeMarker = new maplibregl.Marker({ element: el }).setLngLat([lon, lat]).addTo(map);
+  } else homeMarker.setLngLat([lon, lat]);
+  worker.postMessage({ type: 'itinerary', lat, lon });
+}
 
 function setWork(lat, lon) {
   work = { lat, lon };
@@ -139,7 +196,8 @@ function setWork(lat, lon) {
     marker = new maplibregl.Marker({ element: el, draggable: true }).setLngLat([lon, lat]).addTo(map);
     marker.on('dragend', () => { const p = marker.getLngLat(); work = { lat: p.lat, lon: p.lng }; solve(); });
   } else marker.setLngLat([lon, lat]);
-  $('#hint').textContent = 'Raahaa merkkiä tai napauta uutta kohtaa.';
+  $('#modeRow').style.display = '';
+  setMode('home');
   solve();
 }
 
@@ -155,11 +213,15 @@ worker.onmessage = ev => {
     $('#status').innerHTML =
       `aikataulut <b>${ds}</b> (${meta.weekday})<br>` +
       `${meta.nStops.toLocaleString('fi')} pysäkkiä · ${meta.nConn.toLocaleString('fi')} yhteyttä<br>` +
-      `Napauta karttaa aloittaaksesi.`;
+      (meta.hasWalk ? `kävelyrasteri ${(meta.walkCells / 1e6).toFixed(1)} M ruutua<br>`
+                    : `<span class="warn">kävelyrasteri puuttuu</span><br>`) +
+      `Napauta karttaa asettaaksesi työpaikan.`;
     if (pending) solve();
   } else if (m.type === 'result') {
     if (m.empty) { $('#status').innerHTML = `<span class="warn">${m.empty}</span>`; clearIso(); return; }
     draw(m);
+  } else if (m.type === 'itinerary') {
+    drawTrip(m);
   } else if (m.type === 'error') {
     $('#status').innerHTML = `<span class="warn">Virhe: ${m.message}</span>`;
   }
@@ -207,9 +269,36 @@ function draw(r) {
     paint: { 'raster-opacity': 1, 'raster-resampling': 'nearest', 'raster-fade-duration': 0 } });
 
   $('#status').innerHTML =
-    `<b>${r.reachableStops.toLocaleString('fi')}</b> pysäkkiä tavoitettavissa · ` +
-    `${r.nearestStops} lähtöpysäkkiä työpaikalta<br>` +
-    `laskenta <b>${r.ms} ms</b> · kävelysäteet oikaistu kertoimella 0,75`;
+    `<b>${r.reachableStops.toLocaleString('fi')}</b> pysäkkiä · <b>${r.km2}</b> km² tavoitettavissa<br>` +
+    `laskenta <b>${r.ms} ms</b> · kävely katuverkkoa pitkin`;
+}
+
+const hhmm = t => `${String(Math.floor(t / 3600) % 24).padStart(2, '0')}.${String(Math.floor(t / 60) % 60).padStart(2, '0')}`;
+
+function drawTrip(m) {
+  const el = $('#trip');
+  if (m.empty) { el.innerHTML = `<div class="thead"><span class="s warn">${m.empty}</span></div>`; return; }
+
+  let h = `<div class="thead"><span class="t">${Math.round(m.total / 60)} min</span>` +
+          `<span class="s">lähtö ${hhmm(m.leave)} · perillä ${hhmm(m.arriveBy)}</span></div>`;
+
+  h += `<div class="leg"><span class="tm">${hhmm(m.leave)}</span>` +
+       `<span class="pill walk">${Math.round(m.firstWalk / 60)}′</span>` +
+       `<span class="d">Kävele pysäkille <small>${m.firstStop}</small></span></div>`;
+
+  for (const L of m.legs) {
+    if (L.mode === 'walk') {
+      h += `<div class="leg"><span class="tm">${hhmm(L.dep)}</span>` +
+           `<span class="pill walk">${Math.max(1, Math.round(L.sec / 60))}′</span>` +
+           `<span class="d">Vaihto <small>${L.toName}</small></span></div>`;
+    } else {
+      h += `<div class="leg"><span class="tm">${hhmm(L.dep)}</span>` +
+           `<span class="pill">${L.line}</span>` +
+           `<span class="d">${L.kind}${L.head ? ' → ' + L.head : ''}<br>` +
+           `<small>${L.fromName} → ${L.toName}, ${hhmm(L.arr)}</small></span></div>`;
+    }
+  }
+  el.innerHTML = h;
 }
 
 /* --- ohjaimet --- */
@@ -223,7 +312,6 @@ function solve() {
     arriveBy: hh * 3600 + mm * 60,
     maxTravel: +$('#maxT').value * 60,
     walkMps: +$('#spd').value / 3.6,
-    detour: 0.75,
     maxWalkSec: +$('#walk').value * 60,
     minTransfer: 120
   });
