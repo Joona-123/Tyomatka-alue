@@ -53,7 +53,16 @@ async function load(base) {
   return { ...meta, hasWalk: !!walk, walkCells: walk ? walk.w * walk.h : 0 };
 }
 
-const MODE = { 0: 'Metro', 1: 'Metro', 2: 'Juna', 3: 'Bussi', 4: 'Lautta', 109: 'Juna', 900: 'Ratikka' };
+// GTFS route_type. Perusarvot 0-12, laajennetut 100-1700.
+const MODE = {
+  0: 'Ratikka', 1: 'Metro', 2: 'Juna', 3: 'Bussi', 4: 'Lautta',
+  5: 'Ratikka', 6: 'Gondoli', 7: 'Funikulaari', 11: 'Johdinauto', 12: 'Monorail',
+  100: 'Juna', 109: 'Lähijuna', 400: 'Metro', 401: 'Metro',
+  700: 'Bussi', 701: 'Bussi', 704: 'Bussi', 715: 'Kutsubussi',
+  900: 'Ratikka', 1000: 'Lautta', 1300: 'Gondoli', 1400: 'Funikulaari'
+};
+const modeName = rt => MODE[rt] || (rt >= 700 && rt < 800 ? 'Bussi'
+  : rt >= 900 && rt < 1000 ? 'Ratikka' : rt >= 100 && rt < 200 ? 'Juna' : 'Vuoro');
 
 function nameLegs(legs) {
   return legs.map(L => L.mode === 'walk'
@@ -61,7 +70,7 @@ function nameLegs(legs) {
     : {
         ...L, fromName: D.name[L.fromStop], toName: D.name[L.toStop],
         line: L.route >= 0 ? (D.routeShort[L.route] || '?') : '?',
-        kind: MODE[L.route >= 0 ? D.routeType[L.route] : 3] || 'Vuoro',
+        kind: modeName(L.route >= 0 ? D.routeType[L.route] : 3),
         head: D.tripHead[L.trip] || ''
       });
 }
@@ -103,11 +112,11 @@ self.onmessage = async (e) => {
       let reach = 0;
       for (let i = 0; i < g.grid.length; i++) if (isFinite(g.grid[i])) reach++;
       self.postMessage({
-        type: 'result', grid: g.grid, w: g.w, h: g.h, bounds: g.bounds,
+        type: 'result', grid: g.grid, road: g.road, w: g.w, h: g.h, bounds: g.bounds,
         reachableStops: g.reachableStops, cells: reach, runs: win.times.length,
         km2: +(reach * (walk.cellM / 1000) ** 2).toFixed(1),
         ms: Math.round(performance.now() - t0)
-      }, [g.grid.buffer]);
+      }, [g.grid.buffer, g.road.buffer]);
       return;
     }
 

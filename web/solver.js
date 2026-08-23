@@ -239,15 +239,18 @@ export function buildGridWalk(D, transit, walk, o) {
 
   const w = i1 - i0 + 1, h = j1 - j0 + 1;
   const out = new Float32Array(w * h).fill(Infinity);
+  const road = new Uint8Array(w * h);
   for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) {
-    const d = dist[(j + j0) * gw + (i + i0)];
+    const src = (j + j0) * gw + (i + i0);
+    const d = dist[src];
     if (d >= 0) out[j * w + i] = d;
+    if (ok[src] === 2) road[j * w + i] = 1;
   }
 
   const bx0 = mercX0 + i0 * mercCell, bx1 = mercX0 + (i1 + 1) * mercCell;
   const by0 = mercY0 + j0 * mercCell, by1 = mercY0 + (j1 + 1) * mercCell;
   return {
-    grid: out, w, h,
+    grid: out, road, w, h,
     bounds: [mercToLon(bx0), mercToLat(by1), mercToLon(bx1), mercToLat(by0)],
     reachableStops: seeded
   };

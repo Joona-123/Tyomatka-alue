@@ -27,8 +27,9 @@
   #panel{position:absolute;left:0;right:0;bottom:0;z-index:3;background:var(--panel);
     border-top:1px solid var(--line);padding:0 14px calc(12px + env(safe-area-inset-bottom));
     max-height:66vh;overflow:auto;box-shadow:0 -12px 30px rgba(0,0,0,.45);
-    transition:transform .22s cubic-bezier(.3,.8,.4,1);touch-action:pan-y}
+    transition:max-height .22s cubic-bezier(.3,.8,.4,1);touch-action:pan-y}
   #panel.drag{transition:none}
+  #panel.min{max-height:44px;overflow:hidden}
   #grab{position:sticky;top:0;z-index:1;background:var(--panel);margin:0 -14px 8px;
     padding:9px 0 8px;cursor:grab;touch-action:none;user-select:none}
   #grab::before{content:'';display:block;width:42px;height:4px;border-radius:2px;
@@ -37,7 +38,7 @@
   #panel.min #grab::before{background:var(--accent)}
   @media(min-width:760px){
     #panel{left:auto;top:0;bottom:0;width:330px;max-height:none;border-top:0;border-left:1px solid var(--line);
-      padding-top:56px;transform:none !important}
+      padding-top:56px;max-height:none !important}
     #grab{display:none}
     #title{right:330px}
   }
@@ -166,7 +167,7 @@ const map = new maplibregl.Map({
     }},
     layers: [
       { id: 'bg', type: 'background', paint: { 'background-color': '#0F1A1E' } },
-      { id: 'osm', type: 'raster', source: 'osm', paint: { 'raster-saturation': -0.55, 'raster-brightness-max': 0.92 } }
+      { id: 'osm', type: 'raster', source: 'osm', paint: { 'raster-saturation': -0.85, 'raster-brightness-min': 0.12, 'raster-brightness-max': 0.62, 'raster-opacity': 0.85 } }
     ]
   },
   center: [24.94, 60.19], zoom: 9, attributionControl: { compact: true }
@@ -266,12 +267,13 @@ function draw(r) {
     // ruudukon rivi 0 = etelä, kuvan rivi 0 = pohjoinen
     const src = (r.h - 1 - j) * r.w, dst = j * r.w;
     for (let i = 0; i < r.w; i++) {
-      const v = r.grid[src + i];
       const o = (dst + i) * 4;
+      if (!r.road[src + i]) { px[o+3] = 0; continue; }   // vain varsinaiset tiet
+      const v = r.grid[src + i];
       if (!isFinite(v) || v > maxT) { px[o+3] = 0; continue; }
       const b = Math.min(nb - 1, Math.floor(v / maxT * nb));
       const c = cols[b];
-      px[o] = c[0]; px[o+1] = c[1]; px[o+2] = c[2]; px[o+3] = 205;
+      px[o] = c[0]; px[o+1] = c[1]; px[o+2] = c[2]; px[o+3] = 255;
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -372,34 +374,42 @@ function sync() {
 /* --- paneelin kahva --- */
 (() => {
   const panel = $('#panel'), grab = $('#grab');
-  let y0 = 0, base = 0, off = 0, dragging = false, moved = 0;
-  const hidden = () => Math.max(0, panel.scrollHeight - 42);
-  const set = v => { off = Math.min(hidden(), Math.max(0, v)); panel.style.transform = `translateY(${off}px)`; };
-  const toggle = () => { panel.classList.toggle('min'); set(panel.classList.contains('min') ? hidden() : 0); };
+  const MIN = 44;
+  let y0 = 0, base = 0, dragging = false, moved = 0;
+  // Paneeli kutistuu KORKEUDESTA, ei siirry alaspäin -> kahva ei voi valua
+  // selaimen osoitepalkin alle.
+  const full = () => Math.min(panel.scrollHeight, innerHeight * 0.66);
+  const setH = v => { panel.style.maxHeight = Math.round(Math.min(full(), Math.max(MIN, v))) + 'px'; };
+  const cur = () => panel.getBoundingClientRect().height;
+  const open = () => { panel.classList.remove('min'); panel.style.maxHeight = ''; };
+  const shut = () => { panel.classList.add('min'); panel.style.maxHeight = ''; };
+  const toggle = () => panel.classList.contains('min') ? open() : shut();
 
   grab.addEventListener('pointerdown', e => {
     if (innerWidth >= 760) return;
-    dragging = true; moved = 0; y0 = e.clientY; base = off;
-    panel.classList.add('drag'); grab.setPointerCapture(e.pointerId);
+    dragging = true; moved = 0; y0 = e.clientY; base = cur();
+    panel.classList.add('drag'); panel.classList.remove('min');
+    grab.setPointerCapture(e.pointerId);
   });
   grab.addEventListener('pointermove', e => {
     if (!dragging) return;
     const d = e.clientY - y0;
     moved = Math.max(moved, Math.abs(d));
-    set(base + d);
+    setH(base - d);
   });
   const end = () => {
     if (!dragging) return;
-    dragging = false; panel.classList.remove('drag');
+    dragging = false;
+    panel.classList.remove('drag');
+    panel.style.maxHeight = '';
     if (moved < 6) { toggle(); return; }
-    const min = off > hidden() * 0.35;
-    panel.classList.toggle('min', min);
-    set(min ? hidden() : 0);
+    if (cur() < full() * 0.5) shut(); else open();
   };
   grab.addEventListener('pointerup', end);
   grab.addEventListener('pointercancel', end);
-  grab.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
-  addEventListener('resize', () => { if (panel.classList.contains('min')) set(hidden()); });
+  grab.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+  });
 })();
 
 let t = null;
