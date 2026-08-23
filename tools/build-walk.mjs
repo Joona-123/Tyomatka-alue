@@ -76,7 +76,7 @@ function line(ax, ay, bx, by) {
   const dy = -Math.abs(j1 - j0), sy = j0 < j1 ? 1 : -1;
   let err = dx + dy;
   for (let guard = 0; guard < 100000; guard++) {
-    if (i0 >= 0 && i0 < gw && j0 >= 0 && j0 < gh) g[j0 * gw + i0] = 1;
+    if (i0 >= 0 && i0 < gw && j0 >= 0 && j0 < gh) g[j0 * gw + i0] = 2;   // 2 = varsinainen tie
     if (i0 === i1 && j0 === j1) break;
     const e2 = 2 * err;
     if (e2 >= dy) { err += dy; i0 += sx; }
@@ -125,14 +125,14 @@ for (let d = 0; d < DILATE; d++) {
           if (src[jj * gw + ii]) { hit = 1; break; }
         }
       }
-      if (hit) g[j * gw + i] = 1;
+      if (hit) g[j * gw + i] = 1;   // 1 = levitetty, kuljettava mutta ei piirrettava
     }
   }
 }
 
-let on = 0;
-for (let i = 0; i < g.length; i++) if (g[i]) on++;
-console.log(`Kavelykelpoisia ruutuja: ${on} (${(100 * on / g.length).toFixed(1)} %)`);
+let on = 0, road = 0;
+for (let i = 0; i < g.length; i++) { if (g[i]) on++; if (g[i] === 2) road++; }
+console.log(`Kavelykelpoisia ruutuja: ${on} (${(100 * on / g.length).toFixed(1)} %), joista tieta ${road}`);
 
 fs.mkdirSync(OUT, { recursive: true });
 fs.writeFileSync(path.join(OUT, 'walk_grid.bin'), Buffer.from(g.buffer, 0, g.byteLength));
@@ -140,7 +140,7 @@ const meta = {
   w: gw, h: gh, cellM: CELL_M, lat0,
   bounds: [toLon(x0), toLat(y0 + gh * cell), toLon(x0 + gw * cell), toLat(y0)],
   mercX0: x0, mercY0: y0, mercCell: cell,
-  walkableFraction: on / g.length
+  walkableFraction: on / g.length, roadCells: road
 };
 fs.writeFileSync(path.join(OUT, 'walk_meta.json'), JSON.stringify(meta, null, 2));
 console.log(`walk_grid.bin ${(g.byteLength / 1048576).toFixed(1)} MB`);

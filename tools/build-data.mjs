@@ -175,7 +175,8 @@ readCsv('routes.txt', (c, i) => {
   routeIdx.set(c[i.route_id], routeShort.length);
   routeShort.push(c[i.route_short_name] || '');
   routeLong.push(c[i.route_long_name] || '');
-  routeType.push(parseInt(c[i.route_type], 10) || 3);
+  const rt = parseInt(c[i.route_type], 10);
+  routeType.push(Number.isFinite(rt) ? rt : 3);   // HUOM: 0 = ratikka, ei saa pudota ||-operaattoriin
 });
 log(`Linjoja: ${routeShort.length}`);
 
