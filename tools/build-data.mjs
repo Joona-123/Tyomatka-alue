@@ -154,9 +154,8 @@ const stopIdx = new Map();
 const stopName = [], stopLat = [], stopLon = [];
 
 readCsv('stops.txt', (c, i) => {
-  // location_type 1 = asema, 2..4 = sisaankaynnit yms -> otetaan vain varsinaiset pysakit
-  const lt = i.location_type !== undefined ? c[i.location_type] : '0';
-  if (lt !== '' && lt !== '0' && lt !== undefined) return;
+  // Otetaan KAIKKI joilla on koordinaatit. Asemat (location_type 1) on pakko
+  // pitaa mukana, koska osa feedeista viittaa stop_times:ssa asematasoon.
   const lat = parseFloat(c[i.stop_lat]), lon = parseFloat(c[i.stop_lon]);
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
   stopIdx.set(c[i.stop_id], stopName.length);
@@ -170,10 +169,23 @@ if (nStops === 0) { console.error('VIRHE: ei pysakkeja.'); process.exit(1); }
 
 /* ---------- 3. vuorot ---------- */
 
+const routeIdx = new Map();
+const routeShort = [], routeType = [], routeLong = [];
+readCsv('routes.txt', (c, i) => {
+  routeIdx.set(c[i.route_id], routeShort.length);
+  routeShort.push(c[i.route_short_name] || '');
+  routeLong.push(c[i.route_long_name] || '');
+  routeType.push(parseInt(c[i.route_type], 10) || 3);
+});
+log(`Linjoja: ${routeShort.length}`);
+
 const tripIdx = new Map();
+const tripRoute = [], tripHead = [];
 readCsv('trips.txt', (c, i) => {
   if (!activeServices.has(c[i.service_id])) return;
   tripIdx.set(c[i.trip_id], tripIdx.size);
+  tripRoute.push(routeIdx.get(c[i.route_id]) ?? -1);
+  tripHead.push(i.trip_headsign !== undefined ? (c[i.trip_headsign] || '') : '');
 });
 const nTrips = tripIdx.size;
 log(`Vuoroja kohdepaivana: ${nTrips}`);
@@ -283,10 +295,25 @@ for (let i = 0; i < nStops; i++) {
   a.push(i);
 }
 
+// GTFS:n viralliset vaihdot (esim. aseman sisaiset laiturivaihdot)
+const declared = new Map();   // "a>b" -> sekuntia
+readCsv('transfers.txt', (c, i) => {
+  const a = stopIdx.get(c[i.from_stop_id]), b = stopIdx.get(c[i.to_stop_id]);
+  if (a === undefined || b === undefined || a === b) return;
+  const ty = i.transfer_type !== undefined ? c[i.transfer_type] : '0';
+  if (ty === '3') return;                       // vaihto ei mahdollinen
+  const t = i.min_transfer_time !== undefined ? parseInt(c[i.min_transfer_time], 10) : NaN;
+  const sec = Number.isFinite(t) ? t : 60;
+  const k = a + '>' + b;
+  if (!declared.has(k) || declared.get(k) > sec) declared.set(k, sec);
+});
+log(`transfers.txt: ${declared.size} maariteltya vaihtoa`);
+
 const footStart = new Uint32Array(nStops + 1);
 const fTo = [], fSec = [];
 for (let i = 0; i < nStops; i++) {
   footStart[i] = fTo.length;
+  const seen = new Set();
   const gx = Math.floor(stopLon[i] * mPerLon / cell);
   const gy = Math.floor(stopLat[i] * mPerLat / cell);
   for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
@@ -298,9 +325,22 @@ for (let i = 0; i < nStops; i++) {
       const ey = (stopLat[j] - stopLat[i]) * mPerLat;
       const d = Math.hypot(ex, ey);
       if (d > FOOT_M) continue;
+      if (seen.has(j)) continue;
+      seen.add(j);
+      const dec = declared.get(i + '>' + j);
+      const sec = Math.max(1, Math.round(d / FOOT_MPS));
       fTo.push(j);
-      fSec.push(Math.max(1, Math.round(d / FOOT_MPS)));
+      fSec.push(dec !== undefined ? Math.max(dec, sec) : sec);
     }
+  }
+  // transfers.txt voi maaritella vaihtoja jotka ovat kauempana kuin FOOT_M
+  for (const [k, sec] of declared) {
+    const p = k.indexOf('>');
+    if (+k.slice(0, p) !== i) continue;
+    const j = +k.slice(p + 1);
+    if (seen.has(j)) continue;
+    seen.add(j);
+    fTo.push(j); fSec.push(sec);
   }
 }
 footStart[nStops] = fTo.length;
@@ -325,6 +365,9 @@ total += w('foot_start.bin', b(footStart));
 total += w('foot_to.bin', b(Uint32Array.from(fTo)));
 total += w('foot_sec.bin', b(Uint16Array.from(fSec)));
 
+total += w('routes.json', JSON.stringify({ short: routeShort, long: routeLong, type: routeType }));
+total += w('trips.json', JSON.stringify({ route: tripRoute, head: tripHead }));
+
 const stops = { name: stopName, lat: stopLat.map(v => +v.toFixed(5)), lon: stopLon.map(v => +v.toFixed(5)) };
 total += w('stops.json', JSON.stringify(stops));
 
@@ -345,7 +388,7 @@ const meta = {
   weekday: DAYNAMES[WEEKDAY],
   windowStart: WIN_START,
   windowEnd: WIN_END,
-  nStops, nTrips, nConn, nFoot: fTo.length,
+  nStops, nTrips, nConn, nFoot: fTo.length, nRoutes: routeShort.length,
   bbox: bbox(),
   built: new Date().toISOString(),
   attribution: 'Pysakki- ja aikataulutiedot: HSL, CC BY 4.0. Karttapohja: OpenStreetMap-tekijat.'
