@@ -25,11 +25,20 @@
   #title p b{color:var(--edge)}
 
   #panel{position:absolute;left:0;right:0;bottom:0;z-index:3;background:var(--panel);
-    border-top:1px solid var(--line);padding:10px 14px calc(12px + env(safe-area-inset-bottom));
-    max-height:62vh;overflow:auto;box-shadow:0 -12px 30px rgba(0,0,0,.45)}
+    border-top:1px solid var(--line);padding:0 14px calc(12px + env(safe-area-inset-bottom));
+    max-height:66vh;overflow:auto;box-shadow:0 -12px 30px rgba(0,0,0,.45);
+    transition:transform .22s cubic-bezier(.3,.8,.4,1);touch-action:pan-y}
+  #panel.drag{transition:none}
+  #grab{position:sticky;top:0;z-index:1;background:var(--panel);margin:0 -14px 8px;
+    padding:9px 0 8px;cursor:grab;touch-action:none;user-select:none}
+  #grab::before{content:'';display:block;width:42px;height:4px;border-radius:2px;
+    background:#3A5057;margin:0 auto}
+  #grab:active{cursor:grabbing}
+  #panel.min #grab::before{background:var(--accent)}
   @media(min-width:760px){
     #panel{left:auto;top:0;bottom:0;width:330px;max-height:none;border-top:0;border-left:1px solid var(--line);
-      padding-top:64px}
+      padding-top:56px;transform:none !important}
+    #grab{display:none}
     #title{right:330px}
   }
 
@@ -40,6 +49,8 @@
   input[type=range]{width:100%;accent-color:var(--accent);margin:0}
   input[type=time]{font-family:var(--mono);font-size:15px;background:#16262B;color:var(--ink);
     border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:100%}
+  .tw{display:flex;gap:8px;align-items:center}
+  .tw span{color:var(--muted);font-family:var(--mono)}
 
   #legend{display:flex;gap:2px;margin:2px 0 6px}
   #legend button{flex:1;height:26px;border:0;border-radius:3px;cursor:pointer;position:relative;
@@ -84,9 +95,15 @@
 </div>
 
 <div id="panel">
+  <div id="grab" role="button" tabindex="0" aria-label="Näytä tai piilota asetukset"></div>
+
   <div class="grp">
-    <div class="lbl"><span>Perillä viimeistään</span></div>
-    <input type="time" id="arrive" value="08:15" step="300">
+    <div class="lbl"><span>Perillä välillä</span><span class="val" id="vRuns"></span></div>
+    <div class="tw">
+      <input type="time" id="arrFrom" value="07:30" step="300">
+      <span>–</span>
+      <input type="time" id="arrTo" value="08:30" step="300">
+    </div>
   </div>
 
   <div class="grp">
@@ -270,7 +287,8 @@ function draw(r) {
 
   $('#status').innerHTML =
     `<b>${r.reachableStops.toLocaleString('fi')}</b> pysäkkiä · <b>${r.km2}</b> km² tavoitettavissa<br>` +
-    `laskenta <b>${r.ms} ms</b> · kävely katuverkkoa pitkin`;
+    `<b>${r.runs}</b> saapumisaikaa · laskenta <b>${r.ms} ms</b><br>` +
+    `kävely katuverkkoa pitkin`;
 }
 
 const hhmm = t => `${String(Math.floor(t / 3600) % 24).padStart(2, '0')}.${String(Math.floor(t / 60) % 60).padStart(2, '0')}`;
@@ -290,7 +308,8 @@ function drawTrip(m) {
     if (L.mode === 'walk') {
       h += `<div class="leg"><span class="tm">${hhmm(L.dep)}</span>` +
            `<span class="pill walk">${Math.max(1, Math.round(L.sec / 60))}′</span>` +
-           `<span class="d">Vaihto <small>${L.toName}</small></span></div>`;
+           `<span class="d">${L.last ? 'Kävele työpaikalle' : 'Vaihto'} ` +
+           `<small>${L.last ? 'perillä ' + hhmm(L.arr) : L.toName}</small></span></div>`;
     } else {
       h += `<div class="leg"><span class="tm">${hhmm(L.dep)}</span>` +
            `<span class="pill">${L.line}</span>` +
@@ -305,11 +324,14 @@ function drawTrip(m) {
 function solve() {
   if (!work) return;
   if (!ready) { pending = true; return; }
-  const [hh, mm] = $('#arrive').value.split(':').map(Number);
+  const secs = v => { const [h, m] = v.split(':').map(Number); return h * 3600 + m * 60; };
+  let a0 = secs($('#arrFrom').value), a1 = secs($('#arrTo').value);
+  if (a1 < a0) [a0, a1] = [a1, a0];
+  const step = 300;
   worker.postMessage({
     type: 'solve',
     lat: work.lat, lon: work.lon,
-    arriveBy: hh * 3600 + mm * 60,
+    arriveFrom: a0, arriveTo: a1, step,
     maxTravel: +$('#maxT').value * 60,
     walkMps: +$('#spd').value / 3.6,
     maxWalkSec: +$('#walk').value * 60,
@@ -338,18 +360,54 @@ function legend() {
 }
 
 function sync() {
+  const secs = v => { const [h, m] = v.split(':').map(Number); return h * 3600 + m * 60; };
+  const n = Math.max(1, Math.floor(Math.abs(secs($('#arrTo').value) - secs($('#arrFrom').value)) / 300) + 1);
+  $('#vRuns').textContent = `${n} lähtöä`;
   $('#vMax').textContent = $('#maxT').value + ' min';
   $('#vSpd').textContent = (+$('#spd').value).toFixed(1).replace('.', ',') + ' km/h';
   $('#vWalk').textContent = $('#walk').value + ' min';
   legend();
 }
 
+/* --- paneelin kahva --- */
+(() => {
+  const panel = $('#panel'), grab = $('#grab');
+  let y0 = 0, base = 0, off = 0, dragging = false, moved = 0;
+  const hidden = () => Math.max(0, panel.scrollHeight - 42);
+  const set = v => { off = Math.min(hidden(), Math.max(0, v)); panel.style.transform = `translateY(${off}px)`; };
+  const toggle = () => { panel.classList.toggle('min'); set(panel.classList.contains('min') ? hidden() : 0); };
+
+  grab.addEventListener('pointerdown', e => {
+    if (innerWidth >= 760) return;
+    dragging = true; moved = 0; y0 = e.clientY; base = off;
+    panel.classList.add('drag'); grab.setPointerCapture(e.pointerId);
+  });
+  grab.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    const d = e.clientY - y0;
+    moved = Math.max(moved, Math.abs(d));
+    set(base + d);
+  });
+  const end = () => {
+    if (!dragging) return;
+    dragging = false; panel.classList.remove('drag');
+    if (moved < 6) { toggle(); return; }
+    const min = off > hidden() * 0.35;
+    panel.classList.toggle('min', min);
+    set(min ? hidden() : 0);
+  };
+  grab.addEventListener('pointerup', end);
+  grab.addEventListener('pointercancel', end);
+  grab.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+  addEventListener('resize', () => { if (panel.classList.contains('min')) set(hidden()); });
+})();
+
 let t = null;
 const debounce = () => { clearTimeout(t); t = setTimeout(solve, 180); };
 for (const id of ['#maxT', '#spd', '#walk']) {
   $(id).addEventListener('input', () => { sync(); debounce(); });
 }
-$('#arrive').addEventListener('change', solve);
+for (const id of ['#arrFrom', '#arrTo']) $(id).addEventListener('change', () => { sync(); solve(); });
 sync();
 </script>
 </body>

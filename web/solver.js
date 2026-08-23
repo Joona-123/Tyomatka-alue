@@ -24,12 +24,14 @@ export function csaBackward(D, o) {
   const viaConn = new Int32Array(nStops).fill(-1);
   const viaFoot = new Int32Array(nStops).fill(-1);
   const isTarget = new Uint8Array(nStops);
+  const targetWalk = new Int32Array(nStops).fill(-1);
   const onTrip = new Uint8Array(nTrips);
 
   for (const [s, walkSec] of o.sources) {
     const t = o.arriveBy - walkSec;
     if (t > latest[s]) { latest[s] = t; viaConn[s] = -1; viaFoot[s] = -1; }
     isTarget[s] = 1;
+    if (targetWalk[s] < 0 || walkSec < targetWalk[s]) targetWalk[s] = walkSec;
   }
   for (const [s] of o.sources) {
     for (let j = footStart[s], e = footStart[s + 1]; j < e; j++) {
@@ -60,7 +62,7 @@ export function csaBackward(D, o) {
       }
     }
   }
-  return { latest, viaConn, viaFoot, isTarget };
+  return { latest, viaConn, viaFoot, isTarget, targetWalk, arriveBy: o.arriveBy };
 }
 
 /* ------------------------------------------------------------------ */
@@ -97,11 +99,19 @@ export function reconstruct(D, res, ti, from, o) {
   const { latest, viaConn, viaFoot, isTarget } = res;
   if (latest[from] < 0) return null;
 
+  const { targetWalk } = res;
   const legs = [];
   let s = from, t = latest[s], guard = 0;
 
+  const finish = () => {
+    const wsec = targetWalk[s] >= 0 ? targetWalk[s] : 0;
+    legs.push({ mode: 'walk', last: true, fromStop: s, toStop: -1,
+                dep: t, arr: t + wsec, sec: wsec });
+    return { legs, departure: latest[from], arrival: t + wsec };
+  };
+
   while (guard++ < 100) {
-    if (isTarget[s]) break;
+    if (isTarget[s]) return finish();
 
     if (viaFoot[s] >= 0) {
       const n = viaFoot[s], sec = footTime(D, s, n);
@@ -112,6 +122,7 @@ export function reconstruct(D, res, ti, from, o) {
 
     const ci = viaConn[s];
     if (ci < 0) break;
+
 
     const trip = TRIP[ci];
     let k = ti.start[trip];
@@ -136,7 +147,7 @@ export function reconstruct(D, res, ti, from, o) {
     });
     s = alight; t = alightTime;
   }
-
+  if (isTarget[s]) return finish();
   return { legs, departure: latest[from], arrival: o.arriveBy };
 }
 
@@ -144,8 +155,9 @@ export function reconstruct(D, res, ti, from, o) {
 /* 3. Saavutettavuusruudukko katuverkkoa pitkin (Dial)                 */
 /* ------------------------------------------------------------------ */
 
-export function buildGridWalk(D, latest, walk, o) {
-  const { arriveBy, maxTravel, walkMps, maxWalkSec } = o;
+/** @param transit Int32Array: joukkoliikenneosuus sekunteina per pysakki, -1 = ei saavutettavissa */
+export function buildGridWalk(D, transit, walk, o) {
+  const { maxTravel, walkMps, maxWalkSec } = o;
   const { grid: ok, w: gw, h: gh, mercX0, mercY0, mercCell, cellM } = walk;
 
   const cOrt = Math.max(1, Math.round(cellM / walkMps));
@@ -164,9 +176,8 @@ export function buildGridWalk(D, latest, walk, o) {
   };
 
   let seeded = 0;
-  const departAfter = arriveBy - maxTravel;
   for (let s = 0; s < D.nStops; s++) {
-    if (latest[s] < 0 || latest[s] <= departAfter) continue;
+    if (transit[s] < 0 || transit[s] > maxTravel) continue;
     const x = lonToMerc(D.lon[s]), y = latToMerc(D.lat[s]);
     let i = Math.round((x - mercX0) / mercCell);
     let j = Math.round((y - mercY0) / mercCell);
@@ -182,8 +193,8 @@ export function buildGridWalk(D, latest, walk, o) {
       }
       if (!found) continue;
     }
-    const transit = Math.max(0, arriveBy - latest[s]);
-    push(j * gw + i, transit, transit);
+    const tr = transit[s];
+    push(j * gw + i, tr, tr);
     seeded++;
   }
   if (!seeded) return null;
@@ -259,13 +270,44 @@ export function nearbyStops(D, lat, lon, maxSec, effMps) {
 }
 
 /** Paras lahtopysakki kodin sijainnista: pienin ovelta ovelle -aika. */
-export function bestOrigin(D, latest, lat, lon, o) {
+export function bestOrigin(D, transit, lat, lon, o) {
   let best = null;
   for (const [s, walkSec] of nearbyStops(D, lat, lon, o.maxWalkSec, o.effMps)) {
-    if (latest[s] < 0) continue;
-    const total = o.arriveBy - (latest[s] - walkSec);
-    if (total > o.maxTravel || total < 0) continue;
+    if (transit[s] < 0) continue;
+    const total = transit[s] + walkSec;
+    if (total > o.maxTravel) continue;
     if (!best || total < best.total) best = { stop: s, walkSec, total };
   }
   return best;
+}
+
+/**
+ * Ajaa CSA:n usealle saapumisajalle ja poimii jokaiselle pysakille nopeimman.
+ * @returns {{transit:Int32Array, winner:Int32Array, runs:Array}}
+ */
+export function csaWindow(D, o) {
+  const times = [];
+  for (let t = o.arriveFrom; t <= o.arriveTo; t += o.step) times.push(t);
+  if (!times.length) times.push(o.arriveTo);
+
+  const transit = new Int32Array(D.nStops).fill(-1);
+  const winner = new Int32Array(D.nStops).fill(-1);
+  const runs = [];
+
+  for (let k = 0; k < times.length; k++) {
+    const arriveBy = times[k];
+    const res = csaBackward(D, {
+      arriveBy, sources: o.sources, minTransfer: o.minTransfer,
+      earliest: arriveBy - o.maxTravel
+    });
+    runs.push(res);
+    const L = res.latest;
+    for (let s = 0; s < D.nStops; s++) {
+      if (L[s] < 0) continue;
+      const tt = arriveBy - L[s];
+      if (tt < 0 || tt > o.maxTravel) continue;
+      if (transit[s] < 0 || tt < transit[s]) { transit[s] = tt; winner[s] = k; }
+    }
+  }
+  return { transit, winner, runs, times };
 }

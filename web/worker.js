@@ -57,7 +57,7 @@ const MODE = { 0: 'Metro', 1: 'Metro', 2: 'Juna', 3: 'Bussi', 4: 'Lautta', 109: 
 
 function nameLegs(legs) {
   return legs.map(L => L.mode === 'walk'
-    ? { ...L, fromName: D.name[L.fromStop], toName: D.name[L.toStop] }
+    ? { ...L, fromName: D.name[L.fromStop], toName: L.last ? 'työpaikka' : D.name[L.toStop] }
     : {
         ...L, fromName: D.name[L.fromStop], toName: D.name[L.toStop],
         line: L.route >= 0 ? (D.routeShort[L.route] || '?') : '?',
@@ -83,19 +83,18 @@ self.onmessage = async (e) => {
         self.postMessage({ type: 'result', empty: 'Ei pysäkkejä kävelymatkan päässä työpaikasta.' });
         return;
       }
-      const res = SV.csaBackward(D, {
-        arriveBy: m.arriveBy, sources, minTransfer: m.minTransfer,
-        earliest: m.arriveBy - m.maxTravel
+      const win = SV.csaWindow(D, {
+        arriveFrom: m.arriveFrom, arriveTo: m.arriveTo, step: m.step,
+        sources, minTransfer: m.minTransfer, maxTravel: m.maxTravel
       });
-      last = { res, arriveBy: m.arriveBy, maxTravel: m.maxTravel, walkMps: m.walkMps, maxWalkSec: m.maxWalkSec };
+      last = { win, maxTravel: m.maxTravel, walkMps: m.walkMps, maxWalkSec: m.maxWalkSec };
 
       if (!walk) {
         self.postMessage({ type: 'result', empty: 'Kävelyrasteri puuttuu — aja build uudelleen.' });
         return;
       }
-      const g = SV.buildGridWalk(D, res.latest, walk, {
-        arriveBy: m.arriveBy, maxTravel: m.maxTravel,
-        walkMps: m.walkMps, maxWalkSec: m.maxWalkSec
+      const g = SV.buildGridWalk(D, win.transit, walk, {
+        maxTravel: m.maxTravel, walkMps: m.walkMps, maxWalkSec: m.maxWalkSec
       });
       if (!g) {
         self.postMessage({ type: 'result', empty: 'Mikään pysäkki ei ole saavutettavissa annetussa ajassa.' });
@@ -105,7 +104,7 @@ self.onmessage = async (e) => {
       for (let i = 0; i < g.grid.length; i++) if (isFinite(g.grid[i])) reach++;
       self.postMessage({
         type: 'result', grid: g.grid, w: g.w, h: g.h, bounds: g.bounds,
-        reachableStops: g.reachableStops, cells: reach,
+        reachableStops: g.reachableStops, cells: reach, runs: win.times.length,
         km2: +(reach * (walk.cellM / 1000) ** 2).toFixed(1),
         ms: Math.round(performance.now() - t0)
       }, [g.grid.buffer]);
@@ -115,18 +114,20 @@ self.onmessage = async (e) => {
     if (m.type === 'itinerary') {
       if (!last) throw new Error('Aseta ensin työpaikka');
       const effMps = last.walkMps * 0.75;
-      const b = SV.bestOrigin(D, last.res.latest, m.lat, m.lon, {
-        maxWalkSec: last.maxWalkSec, effMps,
-        arriveBy: last.arriveBy, maxTravel: last.maxTravel
+      const W = last.win;
+      const b = SV.bestOrigin(D, W.transit, m.lat, m.lon, {
+        maxWalkSec: last.maxWalkSec, effMps, maxTravel: last.maxTravel
       });
       if (!b) { self.postMessage({ type: 'itinerary', empty: 'Tänne ei ehdi annetussa ajassa.' }); return; }
-      const r = SV.reconstruct(D, last.res, ti, b.stop, { arriveBy: last.arriveBy });
+      const k = W.winner[b.stop];
+      const r = SV.reconstruct(D, W.runs[k], ti, b.stop, { arriveBy: W.times[k] });
       if (!r) { self.postMessage({ type: 'itinerary', empty: 'Matkan purku epäonnistui.' }); return; }
+      const leave = r.departure - b.walkSec;
       self.postMessage({
         type: 'itinerary',
         legs: nameLegs(r.legs),
         firstWalk: b.walkSec, firstStop: D.name[b.stop],
-        leave: r.departure - b.walkSec, arriveBy: last.arriveBy, total: b.total
+        leave, arriveBy: r.arrival, total: r.arrival - leave
       });
       return;
     }
