@@ -2,6 +2,8 @@ name: Rakenna ja julkaise
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
   schedule:
     - cron: '17 3 * * 1'
 
@@ -25,6 +27,8 @@ jobs:
       WIN_END: 43200
       WEEKDAY: 3
       FOOT_M: 400
+      CELL_M: 50
+      DILATE: 1
 
     steps:
       - uses: actions/checkout@v4
@@ -37,25 +41,43 @@ jobs:
         run: |
           mkdir -p tmp/hsl
           curl -sSfL --retry 3 --retry-delay 5 -o tmp/hsl.zip https://infopalvelut.storage.hsldev.com/gtfs/hsl.zip
-          ls -lh tmp/hsl.zip
           unzip -oq tmp/hsl.zip -d tmp/hsl
           ls -lh tmp/hsl
 
-      - name: Rakenna datapaketti
+      - name: Rakenna aikataulupaketti
         run: node --max-old-space-size=6144 tools/build-data.mjs tmp/hsl web/data hsl
+
+      - name: Asenna osmium
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq osmium-tool
+
+      - name: Lataa OSM-aineisto
+        run: |
+          curl -sSfL --retry 3 --retry-delay 5 -o tmp/hsl.osm.pbf https://karttapalvelu.storage.hsldev.com/hsl.osm/hsl.osm.pbf
+          ls -lh tmp/hsl.osm.pbf
+
+      - name: Poimi kulkuvaylat
+        run: |
+          osmium tags-filter tmp/hsl.osm.pbf w/highway -o tmp/hw.osm.pbf --overwrite
+          osmium export tmp/hw.osm.pbf -f geojsonseq -i flex_mem --geometry-types=linestring -o tmp/hw.geojsonseq --overwrite
+          wc -l tmp/hw.geojsonseq
+
+      - name: Rasteroi kavelyverkko
+        run: |
+          BBOX=$(node -p "JSON.parse(require('fs').readFileSync('web/data/meta.json')).bbox.join(',')")
+          echo "bbox = $BBOX"
+          node --max-old-space-size=6144 tools/build-walk.mjs tmp/hw.geojsonseq web/data "$BBOX"
 
       - name: Tarkista tulos
         run: |
           ls -lh web/data
-          test -s web/data/conn_dep.bin
-          test -s web/data/stops.json
+          for f in conn_dep.bin stops.json routes.json trips.json walk_grid.bin walk_meta.json; do
+            test -s "web/data/$f" || { echo "PUUTTUU: $f"; exit 1; }
+          done
           du -sh web/data
 
       - uses: actions/configure-pages@v5
-
       - uses: actions/upload-pages-artifact@v3
         with:
           path: web
-
       - id: deploy
         uses: actions/deploy-pages@v4
