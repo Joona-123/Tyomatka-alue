@@ -630,14 +630,22 @@ function ensureRouteLayers() {
   });
   map.addLayer({
     id: 'route-stops', type: 'circle', source: 'route',
-    filter: ['==', ['geometry-type'], 'Point'],
+    filter: ['all', ['==', ['geometry-type'], 'Point'], ['!=', ['get', 'end'], 1]],
     paint: {
-      'circle-radius': ['*',
-        ['case', ['==', ['get', 'end'], 1], 1.55, 1],
-        ['interpolate', ['linear'], ['zoom'], 10, 2.4, 14, 4, 17, 6]],
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 2.4, 14, 4, 17, 6],
       'circle-color': '#0F1A1E',
       'circle-stroke-color': ['coalesce', ['get', 'color'], '#EDF3F4'],
-      'circle-stroke-width': ['case', ['==', ['get', 'end'], 1], 2.6, 1.8]
+      'circle-stroke-width': 1.8
+    }
+  });
+  map.addLayer({
+    id: 'route-stops-end', type: 'circle', source: 'route',
+    filter: ['all', ['==', ['geometry-type'], 'Point'], ['==', ['get', 'end'], 1]],
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 3.8, 14, 6.2, 17, 9],
+      'circle-color': '#0F1A1E',
+      'circle-stroke-color': ['coalesce', ['get', 'color'], '#EDF3F4'],
+      'circle-stroke-width': 2.8
     }
   });
 }

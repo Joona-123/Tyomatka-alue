@@ -1001,13 +1001,14 @@ export function routeChainOnWays(W, pts, mask = 0, tries = 3) {
     }
     if (NX.length < 2) continue;
 
+    const SNAP_MAX = 900;          // mercator-yksikkoa, ~450 m todellista
     const near = p => {
       let best = -1, bd = Infinity;
       for (let i = 0; i < NX.length; i++) {
         const d = (NX[i] - p[0]) ** 2 + (NY[i] - p[1]) ** 2;
         if (d < bd) { bd = d; best = i; }
       }
-      return best;
+      return (best >= 0 && Math.sqrt(bd) <= SNAP_MAX) ? best : -1;
     };
 
     // Kaikki pysakit napsautetaan SAMASSA aliverkossa -> ei epajatkuvuuksia
@@ -1043,8 +1044,18 @@ export function routeChainOnWays(W, pts, mask = 0, tries = 3) {
     const stopPos = [ll(nodes[0])];
     let ok = true;
     for (let i = 0; i + 1 < nodes.length; i++) {
-      const seg = path(nodes[i], nodes[i + 1]);
+      const a = nodes[i], b = nodes[i + 1];
+      const seg = path(a, b);
       if (!seg) { ok = false; break; }
+
+      let len = 0;
+      for (let j = 1; j < seg.length; j++) {
+        len += Math.hypot(NX[seg[j]] - NX[seg[j - 1]], NY[seg[j]] - NY[seg[j - 1]]);
+      }
+      const straight = Math.hypot(NX[b] - NX[a], NY[b] - NY[a]);
+      // rata kaartaa loivasti; moninkertainen mutka tarkoittaa vaaraa raidetta
+      if (straight > 400 && len > straight * 2.5) { ok = false; break; }
+
       for (let j = 1; j < seg.length; j++) coords.push(ll(seg[j]));
       stopPos.push(ll(nodes[i + 1]));
     }
