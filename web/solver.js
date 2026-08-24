@@ -157,7 +157,7 @@ export function reconstruct(D, res, ti, from, o) {
 
 /** @param transit Int32Array: joukkoliikenneosuus sekunteina per pysakki, -1 = ei saavutettavissa */
 export function buildGridWalk(D, transit, walk, o) {
-  const { maxTravel, walkMps, maxWalkSec } = o;
+  const { maxTravel, walkMps, maxWalkSec, origin } = o;
   const { grid: ok, w: gw, h: gh, mercX0, mercY0, mercCell, cellM } = walk;
 
   const cOrt = Math.max(1, Math.round(cellM / walkMps));
@@ -175,7 +175,27 @@ export function buildGridWalk(D, transit, walk, o) {
     (buckets[d] || (buckets[d] = [])).push(cell);
   };
 
-  let seeded = 0;
+  let seeded = 0, originSeeded = false;
+
+  if (origin) {
+    const x = lonToMerc(origin.lon), y = latToMerc(origin.lat);
+    let i = Math.round((x - mercX0) / mercCell);
+    let j = Math.round((y - mercY0) / mercCell);
+    if (i >= 0 && i < gw && j >= 0 && j < gh) {
+      if (!ok[j * gw + i]) {
+        let found = false;
+        for (let r = 1; r <= 4 && !found; r++) {
+          for (let dj = -r; dj <= r && !found; dj++) for (let di = -r; di <= r; di++) {
+            const jj = j + dj, ii = i + di;
+            if (jj < 0 || jj >= gh || ii < 0 || ii >= gw) continue;
+            if (ok[jj * gw + ii]) { i = ii; j = jj; found = true; break; }
+          }
+        }
+        if (found) { push(j * gw + i, 0, -1); originSeeded = true; }
+      } else { push(j * gw + i, 0, -1); originSeeded = true; }
+    }
+  }
+
   for (let s = 0; s < D.nStops; s++) {
     if (transit[s] < 0 || transit[s] > maxTravel) continue;
     const x = lonToMerc(D.lon[s]), y = latToMerc(D.lat[s]);
@@ -197,7 +217,7 @@ export function buildGridWalk(D, transit, walk, o) {
     push(j * gw + i, tr, tr);
     seeded++;
   }
-  if (!seeded) return null;
+  if (!seeded && !originSeeded) return null;
 
   for (let d = 0; d <= CAP; d++) {
     const b = buckets[d];
@@ -206,7 +226,7 @@ export function buildGridWalk(D, transit, walk, o) {
       const cell = b[bi];
       if (dist[cell] !== d) continue;
       const st = seedT[cell];
-      if (d - st > maxWalkSec) continue;
+      if (st >= 0 && d - st > maxWalkSec) continue;
       const j = (cell / gw) | 0, i = cell - j * gw;
       for (let dj = -1; dj <= 1; dj++) {
         const jj = j + dj; if (jj < 0 || jj >= gh) continue;
@@ -216,7 +236,7 @@ export function buildGridWalk(D, transit, walk, o) {
           const nc = jj * gw + ii;
           if (!ok[nc]) continue;
           const nd = d + ((di && dj) ? cDia : cOrt);
-          if (nd - st > maxWalkSec) continue;
+          if (st >= 0 && nd - st > maxWalkSec) continue;
           push(nc, nd, st);
         }
       }
@@ -240,20 +260,24 @@ export function buildGridWalk(D, transit, walk, o) {
   const w = i1 - i0 + 1, h = j1 - j0 + 1;
   const out = new Float32Array(w * h).fill(Infinity);
   const road = new Uint8Array(w * h);
+  const walkOnly = new Uint8Array(w * h);
   for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) {
     const src = (j + j0) * gw + (i + i0);
     const d = dist[src];
-    if (d >= 0) out[j * w + i] = d;
+    if (d >= 0) {
+      out[j * w + i] = d;
+      if (seedT[src] < 0) walkOnly[j * w + i] = 1;
+    }
     if (ok[src] === 2) road[j * w + i] = 1;
   }
 
   const bx0 = mercX0 + i0 * mercCell, bx1 = mercX0 + (i1 + 1) * mercCell;
   const by0 = mercY0 + j0 * mercCell, by1 = mercY0 + (j1 + 1) * mercCell;
   return {
-    grid: out, road, w, h,
+    grid: out, road, walkOnly, w, h,
     bounds: [mercToLon(bx0), mercToLat(by1), mercToLon(bx1), mercToLat(by0)],
     mercX0: bx0, mercY0: by0, mercCell,
-    reachableStops: seeded
+    reachableStops: seeded, originSeeded
   };
 }
 

@@ -436,7 +436,9 @@ function draw(r) {
     paint: { 'raster-opacity': 1, 'raster-resampling': 'nearest', 'raster-fade-duration': 0 } });
 
   $('#status').innerHTML =
-    `<b>${r.reachableStops.toLocaleString('fi')}</b> pysäkkiä · <b>${r.km2}</b> km² tavoitettavissa<br>` +
+    (r.noStops
+      ? `<span class="warn">ei pysäkkejä työpaikan lähellä</span> · <b>${r.km2}</b> km² kävellen<br>`
+      : `<b>${r.reachableStops.toLocaleString('fi')}</b> pysäkkiä · <b>${r.km2}</b> km² tavoitettavissa<br>`) +
     `<b>${r.runs}</b> saapumisaika${r.runs === 1 ? '' : 'a'} · laskenta <b>${r.ms} ms</b><br>` +
     (r.preview ? `<span class="warn">esikatselu</span> · ` : '') + `kävely katuverkkoa pitkin`;
   updateLines(r.preview);
@@ -449,7 +451,14 @@ function drawTrip(m) {
   if (m.empty) { el.innerHTML = `<div class="thead"><span class="s warn">${m.empty}</span></div>`; return; }
 
   let h = `<div class="thead"><span class="t">${Math.round(m.total / 60)} min</span>` +
-          `<span class="s">lähtö ${hhmm(m.leave)} · perillä ${hhmm(m.arriveBy)}</span></div>`;
+          `<span class="s">${m.walkOnly ? 'pelkkä kävely' : 'lähtö ' + hhmm(m.leave) + ' · perillä ' + hhmm(m.arriveBy)}</span></div>`;
+
+  if (m.walkOnly) {
+    el.innerHTML = h + `<div class="leg"><span class="tm">—</span>` +
+      `<span class="pill walk">${Math.round(m.total / 60)}′</span>` +
+      `<span class="d">Kävele koko matka<br><small>katuverkkoa pitkin, ei joukkoliikennettä</small></span></div>`;
+    return;
+  }
 
   h += `<div class="leg"><span class="tm">${hhmm(m.leave)}</span>` +
        `<span class="pill walk">${Math.round(m.firstWalk / 60)}′</span>` +

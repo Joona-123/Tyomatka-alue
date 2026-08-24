@@ -87,37 +87,42 @@ self.onmessage = async (e) => {
       if (!D) throw new Error('Dataa ei ole ladattu');
       const t0 = performance.now();
       const effMps = m.walkMps * 0.75;
+      // Pysäkittömyys ei ole virhe: työpaikalle voi päästä pelkästään kävellen.
       const sources = SV.nearbyStops(D, m.lat, m.lon, m.maxWalkSec, effMps);
-      if (!sources.length) {
-        self.postMessage({ type: 'result', empty: 'Ei pysäkkejä kävelymatkan päässä työpaikasta.' });
-        return;
-      }
       const win = SV.csaWindow(D, {
         arriveFrom: m.arriveFrom, arriveTo: m.arriveTo, step: m.step,
         sources, minTransfer: m.minTransfer, maxTravel: m.maxTravel
       });
-      last = { win, maxTravel: m.maxTravel, walkMps: m.walkMps, maxWalkSec: m.maxWalkSec };
+      last = { win, maxTravel: m.maxTravel, walkMps: m.walkMps, maxWalkSec: m.maxWalkSec, grid: null };
 
       if (!walk) {
         self.postMessage({ type: 'result', empty: 'Kävelyrasteri puuttuu — aja build uudelleen.' });
         return;
       }
       const g = SV.buildGridWalk(D, win.transit, walk, {
-        maxTravel: m.maxTravel, walkMps: m.walkMps, maxWalkSec: m.maxWalkSec
+        maxTravel: m.maxTravel, walkMps: m.walkMps, maxWalkSec: m.maxWalkSec,
+        origin: { lat: m.lat, lon: m.lon }
       });
       if (!g) {
         self.postMessage({ type: 'result', empty: 'Mikään pysäkki ei ole saavutettavissa annetussa ajassa.' });
         return;
       }
-      let reach = 0;
-      for (let i = 0; i < g.grid.length; i++) if (isFinite(g.grid[i])) reach++;
+      let reach = 0, walkers = 0;
+      for (let i = 0; i < g.grid.length; i++) {
+        if (!isFinite(g.grid[i])) continue;
+        reach++; if (g.walkOnly[i]) walkers++;
+      }
+      // pidetään ruudukko työsäikeessä matkaehdotusta varten, kopio menee ulos
+      last.grid = g;
+      const outGrid = g.grid.slice();
       self.postMessage({
-        type: 'result', grid: g.grid, road: g.road, w: g.w, h: g.h, bounds: g.bounds,
+        type: 'result', grid: outGrid, road: g.road, w: g.w, h: g.h, bounds: g.bounds,
         mercX0: g.mercX0, mercY0: g.mercY0, mercCell: g.mercCell,
         reachableStops: g.reachableStops, cells: reach, runs: win.times.length,
         km2: +(reach * (walk.cellM / 1000) ** 2).toFixed(1), preview: !!m.preview,
-        ms: Math.round(performance.now() - t0)
-      }, [g.grid.buffer, g.road.buffer]);
+        ms: Math.round(performance.now() - t0),
+        walkOnlyCells: walkers, noStops: sources.length === 0
+      }, [outGrid.buffer, g.road.buffer]);
       return;
     }
 
@@ -125,9 +130,36 @@ self.onmessage = async (e) => {
       if (!last) throw new Error('Aseta ensin työpaikka');
       const effMps = last.walkMps * 0.75;
       const W = last.win;
+
+      // Pelkkä kävely: lue ruudukosta, jolloin aika on katuverkon mukainen.
+      let walkTotal = -1;
+      const G = last.grid;
+      if (G) {
+        const i = Math.floor((SV.lonToMerc(m.lon) - G.mercX0) / G.mercCell);
+        const j = Math.floor((SV.latToMerc(m.lat) - G.mercY0) / G.mercCell);
+        if (i >= 0 && i < G.w && j >= 0 && j < G.h) {
+          const c = j * G.w + i;
+          if (G.walkOnly[c] && isFinite(G.grid[c])) walkTotal = G.grid[c];
+        }
+      }
+
       const b = SV.bestOrigin(D, W.transit, m.lat, m.lon, {
         maxWalkSec: last.maxWalkSec, effMps, maxTravel: last.maxTravel
       });
+
+      if (walkTotal >= 0 && (!b || walkTotal <= b.total)) {
+        const arr = W.times[W.times.length - 1];
+        self.postMessage({
+          type: 'itinerary', walkOnly: true,
+          legs: [{ mode: 'walk', last: true, fromStop: -1, toStop: -1,
+                   fromName: 'koti', toName: 'työpaikka',
+                   dep: arr - walkTotal, arr, sec: walkTotal }],
+          firstWalk: 0, firstStop: null,
+          leave: arr - walkTotal, arriveBy: arr, total: walkTotal
+        });
+        return;
+      }
+
       if (!b) { self.postMessage({ type: 'itinerary', empty: 'Tänne ei ehdi annetussa ajassa.' }); return; }
       const k = W.winner[b.stop];
       const r = SV.reconstruct(D, W.runs[k], ti, b.stop, { arriveBy: W.times[k] });
