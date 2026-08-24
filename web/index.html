@@ -73,6 +73,7 @@
     border-top:1px solid var(--line);padding-top:9px;margin-bottom:7px}
   .thead .t{font-family:var(--mono);font-size:19px;color:var(--edge)}
   .thead .s{font-size:11px;color:var(--muted)}
+  .sub{font-family:var(--mono);font-size:11px;color:var(--muted);margin:-3px 0 6px}
   .leg{display:flex;gap:9px;align-items:flex-start;padding:4px 0;font-size:12.5px}
   .leg .tm{font-family:var(--mono);font-size:12px;color:var(--muted);min-width:38px;padding-top:2px}
   .leg .pill{font-family:var(--mono);font-size:12px;font-weight:700;color:#fff;
@@ -125,7 +126,7 @@
   </div>
 
   <div class="grp">
-    <div class="lbl"><span>Vaihtoja enintään</span></div>
+    <div class="lbl"><span>Vaihtoja enintään</span><span class="val" id="vXfer">∞</span></div>
     <div id="xfer" class="seg">
       <button type="button" data-v="0">0</button>
       <button type="button" data-v="1">1</button>
@@ -283,6 +284,8 @@ let maxTransfers = -1;
 for (const b of document.querySelectorAll('#xfer button')) {
   b.onclick = () => {
     maxTransfers = +b.dataset.v;
+    $('#vXfer').textContent = maxTransfers < 0
+      ? '∞' : `${maxTransfers + 1} kulkuvälinettä`;
     for (const o of document.querySelectorAll('#xfer button')) {
       o.setAttribute('aria-pressed', String(o === b));
     }
@@ -379,6 +382,8 @@ worker.onmessage = ev => {
                     : `<span class="warn">kävelyrasteri puuttuu</span><br>`) +
       (meta.hasWays ? `katuverkko ${meta.nWays.toLocaleString('fi')} väylää<br>`
                     : `<span class="warn">katuverkko puuttuu — aja build uudelleen</span><br>`) +
+      `kävelyreititys: ${/OK/.test(meta.probe || '') ? '<b>' + meta.probe + '</b>'
+                        : '<span class="warn">' + (meta.probe || '?') + '</span>'}<br>` +
       (meta.hasRail ? `rataverkko ${meta.nRailWays.toLocaleString('fi')} osuutta<br>`
                     : `<span class="warn">rataverkko puuttuu — aja build uudelleen</span><br>`) +
       `Napauta karttaa asettaaksesi työpaikan.`;
@@ -416,8 +421,9 @@ const MAXFEAT = 14000;
 let ways = null, lastRes = null;
 
 async function loadWays(base) {
+  const v = meta && meta.ver ? '?v=' + meta.ver : '';
   const b = async (n, T) => {
-    const r = await fetch(`${base}/${n}`);
+    const r = await fetch(`${base}/${n}${v}`);
     if (!r.ok) throw new Error(`${n}: HTTP ${r.status}`);
     return new T(await r.arrayBuffer());
   };
@@ -638,7 +644,8 @@ function drawRoute(geom) {
   const feats = [];
   for (const g of geom) {
     if (!g.coords || g.coords.length < 2) continue;
-    const col = g.mode === 'transit' ? routeColor(g.rt, g.line) : '#EDF3F4';
+    const col = g.mode === 'transit' ? routeColor(g.rt, g.line)
+              : (g.exact === false ? '#FF5C5C' : '#EDF3F4');
     feats.push({ type: 'Feature',
       properties: { mode: g.mode, rt: g.rt == null ? 3 : g.rt, color: col },
       geometry: { type: 'LineString', coordinates: g.coords } });
@@ -657,8 +664,12 @@ function drawTrip(m) {
   }
   drawRoute(m.geometry);
 
+  const veh = (m.legs || []).filter(L => L.mode === 'transit').length;
+  const vtxt = m.walkOnly ? 'pelkkä kävely'
+    : `${veh} kulkuväline${veh === 1 ? '' : 'ttä'} · ${Math.max(0, veh - 1)} vaihtoa`;
   let h = `<div class="thead"><span class="t">${Math.round(m.total / 60)} min</span>` +
-          `<span class="s">${m.walkOnly ? 'pelkkä kävely' : 'lähtö ' + hhmm(m.leave) + ' · perillä ' + hhmm(m.arriveBy)}</span></div>`;
+          `<span class="s">${vtxt}</span></div>` +
+          (m.walkOnly ? '' : `<div class="sub">lähtö ${hhmm(m.leave)} · perillä ${hhmm(m.arriveBy)}</div>`);
 
   if (m.walkOnly) {
     el.innerHTML = h + `<div class="leg"><span class="tm">—</span>` +

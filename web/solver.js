@@ -15,33 +15,52 @@ export const mercToLat = y => (2 * Math.atan(Math.exp(y / R_EARTH)) - Math.PI / 
 /* 1. CSA                                                              */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Taaksepain ajettava CSA, jossa nousujen lukumaara on OMA ULOTTUVUUTENSA.
+ *
+ * Aiempi versio piti kirjaa vain parhaan (myohaisimman) labelin nousumaarasta.
+ * Se on ahne: jos pysakin paras label syntyi kolmella nousulla, kahden nousun
+ * vaihtoehto katosi kokonaan eika rajaus toiminut oikein. Nyt jokaiselle
+ * nousumaaralle 0..maxBoards pidetaan oma label, jolloin rajaus on tarkka.
+ *
+ * Taso b = "korkeintaan b nousua jaljella maaliin asti".
+ * Kavely ei ole nousu.
+ */
 export function csaBackward(D, o) {
   const { DEP, ARR, FROM, TO, TRIP, footStart, footTo, footSec, nStops, nTrips } = D;
   const minTransfer = o.minTransfer ?? 120;
   const earliest = o.earliest ?? 0;
 
   const maxBoards = (o.maxTransfers == null || o.maxTransfers < 0)
-    ? 255 : Math.min(255, o.maxTransfers + 1);
+    ? 6 : Math.max(1, Math.min(6, o.maxTransfers + 1));
+  const nLevels = maxBoards + 1;
 
-  const latest = new Int32Array(nStops).fill(-1);
-  const viaConn = new Int32Array(nStops).fill(-1);
-  const viaFoot = new Int32Array(nStops).fill(-1);
+  const L = new Int32Array(nLevels * nStops).fill(-1);
+  const VC = new Int32Array(nLevels * nStops).fill(-1);
+  const VF = new Int32Array(nLevels * nStops).fill(-1);
+  const onTripL = new Uint8Array(nLevels * nTrips);
   const isTarget = new Uint8Array(nStops);
   const targetWalk = new Int32Array(nStops).fill(-1);
-  const boards = new Uint8Array(nStops);          // nousuja talta pysakilta maaliin
-  const onTrip = new Uint8Array(nTrips);
-  const tripBoards = new Uint8Array(nTrips);
+
+  // Paivitys tasolle b leviaa aina ylospain: >=b nousua sallivat tasot
+  // saavat saman vaihtoehdon ilmaiseksi. Katkaisu sailyttaa monotonisuuden.
+  const put = (b, s, time, conn, foot) => {
+    for (let bb = b; bb < nLevels; bb++) {
+      const off = bb * nStops + s;
+      if (time <= L[off]) break;
+      L[off] = time; VC[off] = conn; VF[off] = foot;
+    }
+  };
 
   for (const [s, walkSec] of o.sources) {
-    const t = o.arriveBy - walkSec;
-    if (t > latest[s]) { latest[s] = t; viaConn[s] = -1; viaFoot[s] = -1; }
     isTarget[s] = 1;
     if (targetWalk[s] < 0 || walkSec < targetWalk[s]) targetWalk[s] = walkSec;
+    put(0, s, o.arriveBy - walkSec, -1, -1);
   }
   for (const [s] of o.sources) {
+    const base = L[s];
     for (let j = footStart[s], e = footStart[s + 1]; j < e; j++) {
-      const n = footTo[j], cand = latest[s] - footSec[j];
-      if (cand > latest[n]) { latest[n] = cand; viaConn[n] = -1; viaFoot[n] = s; }
+      put(0, footTo[j], base - footSec[j], -1, s);
     }
   }
 
@@ -49,32 +68,35 @@ export function csaBackward(D, o) {
   for (let i = 0; i < n; i++) {
     const dep = DEP[i];
     if (dep < earliest) break;
-    const tr = TRIP[i];
-    let nb2;
-    let usable = onTrip[tr] === 1;
-    if (usable) nb2 = tripBoards[tr];
-    else {
-      const t = TO[i], lt = latest[t];
-      if (lt >= 0 && ARR[i] + minTransfer <= lt) {
-        nb2 = boards[t] + 1;
-        usable = nb2 <= maxBoards;
-      }
-    }
-    if (!usable) continue;
-    onTrip[tr] = 1; tripBoards[tr] = nb2;
+    const tr = TRIP[i], f = FROM[i], t = TO[i], arr = ARR[i];
 
-    const f = FROM[i];
-    if (dep > latest[f]) {
-      latest[f] = dep; viaConn[f] = i; viaFoot[f] = -1; boards[f] = nb2;
-      for (let j = footStart[f], e = footStart[f + 1]; j < e; j++) {
-        const nb = footTo[j], cand = dep - footSec[j];
-        if (cand > latest[nb]) {
-          latest[nb] = cand; viaConn[nb] = -1; viaFoot[nb] = f; boards[nb] = nb2;
+    for (let b = 1; b < nLevels; b++) {
+      const ti2 = b * nTrips + tr;
+      let usable = onTripL[ti2] === 1;
+      if (!usable) {
+        const lt = L[(b - 1) * nStops + t];      // poistuminen: yksi nousu kaytetty
+        usable = lt >= 0 && arr + minTransfer <= lt;
+      }
+      if (!usable) continue;
+      onTripL[ti2] = 1;
+
+      if (dep > L[b * nStops + f]) {
+        put(b, f, dep, i, -1);
+        for (let j = footStart[f], e = footStart[f + 1]; j < e; j++) {
+          put(b, footTo[j], dep - footSec[j], -1, f);
         }
       }
     }
   }
-  return { latest, viaConn, viaFoot, isTarget, targetWalk, boards, arriveBy: o.arriveBy };
+
+  const top = maxBoards * nStops;
+  return {
+    latest: L.subarray(top, top + nStops),
+    viaConn: VC.subarray(top, top + nStops),
+    viaFoot: VF.subarray(top, top + nStops),
+    L, VC, VF, nLevels, nStops,
+    isTarget, targetWalk, arriveBy: o.arriveBy
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -123,49 +145,56 @@ function footTime(D, a, b) {
 /** Purkaa matkan pysakilta `from` maaliin. */
 export function reconstruct(D, res, ti, from, o) {
   const { ARR, DEP, FROM, TO, TRIP } = D;
-  const { latest, viaConn, viaFoot, isTarget } = res;
-  if (latest[from] < 0) return null;
+  const { L, VC, VF, nLevels, nStops, isTarget, targetWalk } = res;
 
-  const { targetWalk } = res;
+  let level = nLevels - 1;
+  if (L[level * nStops + from] < 0) return null;
+  // pienin taso joka antaa saman ajan -> vahiten vaihtoja
+  const best = L[level * nStops + from];
+  for (let b = 0; b < nLevels; b++) {
+    if (L[b * nStops + from] === best) { level = b; break; }
+  }
+
   const legs = [];
-  let s = from, t = latest[s], guard = 0;
+  let s = from, t = L[level * nStops + s], guard = 0;
 
   const finish = () => {
     const wsec = targetWalk[s] >= 0 ? targetWalk[s] : 0;
     legs.push({ mode: 'walk', last: true, fromStop: s, toStop: -1,
                 dep: t, arr: t + wsec, sec: wsec });
-    return { legs, departure: latest[from], arrival: t + wsec };
+    return { legs, departure: L[level * nStops + from], arrival: t + wsec };
   };
 
   while (guard++ < 100) {
     if (isTarget[s]) return finish();
+    const off = level * nStops + s;
 
-    if (viaFoot[s] >= 0) {
-      const n = viaFoot[s], sec = footTime(D, s, n);
-      legs.push({ mode: 'walk', fromStop: s, toStop: n, dep: t, arr: t + sec, sec });
-      s = n; t += sec;
+    if (VF[off] >= 0) {
+      const n2 = VF[off], sec = footTime(D, s, n2);
+      legs.push({ mode: 'walk', fromStop: s, toStop: n2, dep: t, arr: t + sec, sec });
+      s = n2; t += sec;
       continue;
     }
 
-    const ci = viaConn[s];
-    if (ci < 0) break;
-
+    const ci = VC[off];
+    if (ci < 0 || level < 1) break;
 
     const trip = TRIP[ci];
     let k = ti.start[trip];
     while (k < ti.start[trip + 1] && ti.list[k] !== ci) k++;
 
+    const lo = (level - 1) * nStops;           // poistumisen jalkeen yksi nousu vahemman
     let alight = TO[ci], alightTime = ARR[ci], stops = 1;
     const path = [FROM[ci]];
-    if (k >= ti.start[trip + 1]) path.push(TO[ci]);   // varmistus: vuoroa ei loytynyt
+    if (k >= ti.start[trip + 1]) path.push(TO[ci]);
     for (let m = k; m < ti.start[trip + 1]; m++) {
       const c = ti.list[m];
       alight = TO[c]; alightTime = ARR[c]; stops = m - k + 1;
       path.push(alight);
       if (isTarget[alight]) break;
-      if (latest[alight] >= alightTime) {
-        const nx = viaConn[alight];
-        if (viaFoot[alight] >= 0 || (nx >= 0 && TRIP[nx] !== trip)) break;
+      if (L[lo + alight] >= alightTime) {
+        const nx = VC[lo + alight];
+        if (VF[lo + alight] >= 0 || (nx >= 0 && TRIP[nx] !== trip)) break;
       }
     }
 
@@ -175,10 +204,10 @@ export function reconstruct(D, res, ti, from, o) {
       fromStop: FROM[ci], toStop: alight,
       dep: DEP[ci], arr: alightTime, stops, path
     });
-    s = alight; t = alightTime;
+    s = alight; t = alightTime; level--;
   }
-  if (isTarget[s]) return finish();
-  return { legs, departure: latest[from], arrival: o.arriveBy };
+
+  return { legs, departure: L[(nLevels - 1) * nStops + from], arrival: o.arriveBy };
 }
 
 /* ------------------------------------------------------------------ */
@@ -536,65 +565,72 @@ export function csaForward(D, o) {
   const { DEP, ARR, FROM, TO, TRIP, footStart, footTo, footSec, nStops, nTrips } = D;
   const minTransfer = o.minTransfer ?? 120;
 
+  // Sama tasorakenne kuin taaksepain-versiossa: taso b = korkeintaan b nousua
+  // kaytetty lahdosta. Kavely ei ole nousu.
   const maxBoards = (o.maxTransfers == null || o.maxTransfers < 0)
-    ? 255 : Math.min(255, o.maxTransfers + 1);
+    ? 6 : Math.max(1, Math.min(6, o.maxTransfers + 1));
+  const nLevels = maxBoards + 1;
 
-  const earliest = new Int32Array(nStops).fill(INF32);
-  const viaConn = new Int32Array(nStops).fill(-1);
-  const viaFoot = new Int32Array(nStops).fill(-1);
+  const E = new Int32Array(nLevels * nStops).fill(INF32);
+  const VC = new Int32Array(nLevels * nStops).fill(-1);
+  const VF = new Int32Array(nLevels * nStops).fill(-1);
+  const onTripL = new Uint8Array(nLevels * nTrips);
   const isSource = new Uint8Array(nStops);
   const sourceWalk = new Int32Array(nStops).fill(-1);
-  const boards = new Uint8Array(nStops);
-  const onTrip = new Uint8Array(nTrips);
-  const tripBoards = new Uint8Array(nTrips);
+
+  const put = (b, s, time, conn, foot) => {
+    for (let bb = b; bb < nLevels; bb++) {
+      const off = bb * nStops + s;
+      if (time >= E[off]) break;
+      E[off] = time; VC[off] = conn; VF[off] = foot;
+    }
+  };
 
   for (const [s, walkSec] of o.sources) {
-    const t = o.departAt + walkSec;
-    if (t < earliest[s]) { earliest[s] = t; viaConn[s] = -1; viaFoot[s] = -1; }
     isSource[s] = 1;
     if (sourceWalk[s] < 0 || walkSec < sourceWalk[s]) sourceWalk[s] = walkSec;
+    put(0, s, o.departAt + walkSec, -1, -1);
   }
   for (const [s] of o.sources) {
+    const base = E[s];
     for (let j = footStart[s], e = footStart[s + 1]; j < e; j++) {
-      const n = footTo[j], cand = earliest[s] + footSec[j];
-      if (cand < earliest[n]) { earliest[n] = cand; viaConn[n] = -1; viaFoot[n] = s; }
+      put(0, footTo[j], base + footSec[j], -1, s);
     }
   }
 
   const horizon = o.departAt + o.maxTravel;
-  // yhteydet on tallennettu laskevasti -> lopusta alkuun = nouseva lahtoaika
-  for (let i = DEP.length - 1; i >= 0; i--) {
+  for (let i = DEP.length - 1; i >= 0; i--) {     // tallennus laskeva -> luku nouseva
     const dep = DEP[i];
     if (dep > horizon) break;
     if (dep < o.departAt) continue;
-    const tr = TRIP[i], f = FROM[i];
-    let nb2;
-    let usable = onTrip[tr] === 1;
-    if (usable) nb2 = tripBoards[tr];
-    else {
-      const e = earliest[f];
-      if (e !== INF32 && (isSource[f] ? e <= dep : e + minTransfer <= dep)) {
-        nb2 = boards[f] + 1;
-        usable = nb2 <= maxBoards;
-      }
-    }
-    if (!usable) continue;
-    onTrip[tr] = 1; tripBoards[tr] = nb2;
+    const tr = TRIP[i], f = FROM[i], t = TO[i], arr = ARR[i];
 
-    const t = TO[i];
-    if (ARR[i] < earliest[t]) {
-      earliest[t] = ARR[i]; viaConn[t] = i; viaFoot[t] = -1; boards[t] = nb2;
-      for (let j = footStart[t], e2 = footStart[t + 1]; j < e2; j++) {
-        const n = footTo[j], cand = ARR[i] + footSec[j];
-        if (cand < earliest[n]) {
-          earliest[n] = cand; viaConn[n] = -1; viaFoot[n] = t; boards[n] = nb2;
+    for (let b = 1; b < nLevels; b++) {
+      const ti2 = b * nTrips + tr;
+      let usable = onTripL[ti2] === 1;
+      if (!usable) {
+        const e = E[(b - 1) * nStops + f];
+        if (e !== INF32) usable = isSource[f] ? e <= dep : e + minTransfer <= dep;
+      }
+      if (!usable) continue;
+      onTripL[ti2] = 1;
+
+      if (arr < E[b * nStops + t]) {
+        put(b, t, arr, i, -1);
+        for (let j = footStart[t], e2 = footStart[t + 1]; j < e2; j++) {
+          put(b, footTo[j], arr + footSec[j], -1, t);
         }
       }
     }
   }
-  return { earliest, viaConn, viaFoot, isSource, sourceWalk, boards, departAt: o.departAt };
-}
 
+  const top = maxBoards * nStops;
+  return {
+    earliest: E.subarray(top, top + nStops),
+    E, VC, VF, nLevels, nStops,
+    isSource, sourceWalk, departAt: o.departAt
+  };
+}
 /** Ajaa eteenpain-CSA:n usealle lahtoajalle ja poimii nopeimman per pysakki. */
 export function csaWindowForward(D, o) {
   const times = [];
@@ -624,27 +660,38 @@ export function csaWindowForward(D, o) {
 /** Purkaa matkan lahtopaikasta annetulle pysakille. */
 export function reconstructForward(D, res, ti, to, o) {
   const { DEP, ARR, FROM, TO, TRIP } = D;
-  const { earliest, viaConn, viaFoot, isSource, sourceWalk } = res;
-  if (earliest[to] === INF32) return null;
+  const { E, VC, VF, nLevels, nStops, isSource, sourceWalk } = res;
+
+  let level = nLevels - 1;
+  if (E[level * nStops + to] === INF32) return null;
+  const best = E[level * nStops + to];
+  for (let b = 0; b < nLevels; b++) {
+    if (E[b * nStops + to] === best) { level = b; break; }   // vahiten vaihtoja
+  }
 
   const rev = [];
   let s = to, guard = 0;
   while (guard++ < 100 && !isSource[s]) {
-    if (viaFoot[s] >= 0) {
-      const p = viaFoot[s], sec = footTime(D, p, s);
-      rev.push({ mode: 'walk', fromStop: p, toStop: s, sec, dep: earliest[s] - sec, arr: earliest[s] });
+    const off = level * nStops + s;
+
+    if (VF[off] >= 0) {
+      const p = VF[off], sec = footTime(D, p, s);
+      rev.push({ mode: 'walk', fromStop: p, toStop: s, sec,
+                 dep: E[off] - sec, arr: E[off] });
       s = p; continue;
     }
-    const ci = viaConn[s];
-    if (ci < 0) break;
+
+    const ci = VC[off];
+    if (ci < 0 || level < 1) break;
     const trip = TRIP[ci];
     let k = ti.start[trip];
     while (k < ti.start[trip + 1] && ti.list[k] !== ci) k++;
-    // peruutetaan vuoroa taaksepain nousupysakille asti
+
+    const lo = (level - 1) * nStops;
     let m = k;
     while (m > ti.start[trip]) {
       const f = FROM[ti.list[m]];
-      const vc = viaConn[f];
+      const vc = VC[lo + f];
       if (vc >= 0 && TRIP[vc] === trip) m--; else break;
     }
     const bc = ti.list[m];
@@ -655,15 +702,13 @@ export function reconstructForward(D, res, ti, to, o) {
       fromStop: FROM[bc], toStop: s, dep: DEP[bc], arr: ARR[ci],
       stops: k - m + 1, path
     });
-    s = FROM[bc];
+    s = FROM[bc]; level--;
   }
 
   const legs = rev.reverse();
   const w0 = sourceWalk[s] >= 0 ? sourceWalk[s] : 0;
-  return {
-    legs, firstWalk: w0, firstStop: s,
-    departure: res.departAt, arrival: earliest[to]
-  };
+  return { legs, firstWalk: w0, firstStop: s,
+           departure: res.departAt, arrival: E[(nLevels - 1) * nStops + to] };
 }
 
 /* ------------------------------------------------------------------ */
