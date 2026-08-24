@@ -200,7 +200,14 @@ function setHome(lat, lon) {
     const el = document.createElement('div');
     el.style.cssText = 'width:13px;height:13px;border-radius:3px;background:#5FD3C4;' +
       'border:2.5px solid #0F1A1E;transform:rotate(45deg)';
-    homeMarker = new maplibregl.Marker({ element: el }).setLngLat([lon, lat]).addTo(map);
+    homeMarker = new maplibregl.Marker({ element: el, draggable: true }).setLngLat([lon, lat]).addTo(map);
+    const upd = () => {
+      const p = homeMarker.getLngLat();
+      home = { lat: p.lat, lon: p.lng };
+      worker.postMessage({ type: 'itinerary', lat: p.lat, lon: p.lng });
+    };
+    homeMarker.on('drag', upd);
+    homeMarker.on('dragend', upd);
   } else homeMarker.setLngLat([lon, lat]);
   worker.postMessage({ type: 'itinerary', lat, lon });
 }
@@ -212,7 +219,14 @@ function setWork(lat, lon) {
     el.style.cssText = 'width:16px;height:16px;border-radius:50%;background:#E8A33D;' +
       'border:2.5px solid #0F1A1E;box-shadow:0 0 0 1.5px #E8A33D';
     marker = new maplibregl.Marker({ element: el, draggable: true }).setLngLat([lon, lat]).addTo(map);
-    marker.on('dragend', () => { const p = marker.getLngLat(); work = { lat: p.lat, lon: p.lng }; solve(); });
+    marker.on('drag', () => {
+      const p = marker.getLngLat(); work = { lat: p.lat, lon: p.lng };
+      solve({ preview: true });
+    });
+    marker.on('dragend', () => {
+      const p = marker.getLngLat(); work = { lat: p.lat, lon: p.lng };
+      solve();
+    });
   } else marker.setLngLat([lon, lat]);
   $('#modeRow').style.display = '';
   setMode('home');
@@ -239,12 +253,17 @@ worker.onmessage = ev => {
       .catch(e => { $('#status').innerHTML += `<br><span class="warn">viivat: ${e.message}</span>`; });
     if (pending) solve();
   } else if (m.type === 'result') {
-    if (m.empty) { $('#status').innerHTML = `<span class="warn">${m.empty}</span>`; clearIso(); return; }
+    if (m.empty) {
+      $('#status').innerHTML = `<span class="warn">${m.empty}</span>`;
+      clearIso(); releaseWorker(); return;
+    }
     draw(m);
+    releaseWorker();
   } else if (m.type === 'itinerary') {
     drawTrip(m);
   } else if (m.type === 'error') {
     $('#status').innerHTML = `<span class="warn">Virhe: ${m.message}</span>`;
+    releaseWorker();
   }
 };
 
@@ -309,8 +328,9 @@ function ensureLineLayers() {
   });
 }
 
-function updateLines() {
+function updateLines(preview) {
   if (!ways || !lastRes || map.getZoom() < VZ) return;
+  const cap = preview ? 4000 : MAXFEAT;
   ensureLineLayers();
 
   const r = lastRes;
@@ -353,14 +373,14 @@ function updateLines() {
       if (b !== runB) {
         run.push(ll);
         if (run.length > 1) feats.push({ type: 'Feature', properties: { b: runB }, geometry: { type: 'LineString', coordinates: run } });
-        if (feats.length >= MAXFEAT) break outer;
+        if (feats.length >= cap) break outer;
         run = [ll]; runB = b;
         continue;
       }
       run.push(ll);
     }
     if (run && run.length > 1) feats.push({ type: 'Feature', properties: { b: runB }, geometry: { type: 'LineString', coordinates: run } });
-    if (feats.length >= MAXFEAT) break;
+    if (feats.length >= cap) break;
   }
 
   const match = ['match', ['get', 'b']];
@@ -417,9 +437,9 @@ function draw(r) {
 
   $('#status').innerHTML =
     `<b>${r.reachableStops.toLocaleString('fi')}</b> pysäkkiä · <b>${r.km2}</b> km² tavoitettavissa<br>` +
-    `<b>${r.runs}</b> saapumisaikaa · laskenta <b>${r.ms} ms</b><br>` +
-    `kävely katuverkkoa pitkin`;
-  updateLines();
+    `<b>${r.runs}</b> saapumisaika${r.runs === 1 ? '' : 'a'} · laskenta <b>${r.ms} ms</b><br>` +
+    (r.preview ? `<span class="warn">esikatselu</span> · ` : '') + `kävely katuverkkoa pitkin`;
+  updateLines(r.preview);
 }
 
 const hhmm = t => `${String(Math.floor(t / 3600) % 24).padStart(2, '0')}.${String(Math.floor(t / 60) % 60).padStart(2, '0')}`;
@@ -452,22 +472,38 @@ function drawTrip(m) {
 }
 
 /* --- ohjaimet --- */
-function solve() {
+let busy = false, queued = null;
+
+function solve(opts) {
   if (!work) return;
   if (!ready) { pending = true; return; }
+  const preview = !!(opts && opts.preview);
   const secs = v => { const [h, m] = v.split(':').map(Number); return h * 3600 + m * 60; };
   let a0 = secs($('#arrFrom').value), a1 = secs($('#arrTo').value);
   if (a1 < a0) [a0, a1] = [a1, a0];
-  const step = 300;
-  worker.postMessage({
-    type: 'solve',
+
+  // Raahatessa ajetaan vain yksi saapumisaika ikkunan keskeltä. Se on
+  // ~13x kevyempi ja riittää siihen että alue elää sormen mukana.
+  if (preview) { const mid = Math.round((a0 + a1) / 600) * 300; a0 = a1 = mid; }
+
+  const msg = {
+    type: 'solve', preview,
     lat: work.lat, lon: work.lon,
-    arriveFrom: a0, arriveTo: a1, step,
+    arriveFrom: a0, arriveTo: a1, step: 300,
     maxTravel: +$('#maxT').value * 60,
     walkMps: +$('#spd').value / 3.6,
     maxWalkSec: +$('#walk').value * 60,
     minTransfer: 120
-  });
+  };
+
+  if (busy) { queued = msg; return; }   // uusin korvaa jonossa olevan
+  busy = true;
+  worker.postMessage(msg);
+}
+
+function releaseWorker() {
+  busy = false;
+  if (queued) { const q = queued; queued = null; busy = true; worker.postMessage(q); }
 }
 
 function legend() {
@@ -542,9 +578,10 @@ function sync() {
 })();
 
 let t = null;
-const debounce = () => { clearTimeout(t); t = setTimeout(solve, 180); };
+const debounce = () => { clearTimeout(t); t = setTimeout(() => solve({ preview: true }), 60); };
 for (const id of ['#maxT', '#spd', '#walk']) {
   $(id).addEventListener('input', () => { sync(); debounce(); });
+  $(id).addEventListener('change', () => { sync(); solve(); });
 }
 for (const id of ['#arrFrom', '#arrTo']) $(id).addEventListener('change', () => { sync(); solve(); });
 sync();

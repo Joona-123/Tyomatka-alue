@@ -115,7 +115,7 @@ self.onmessage = async (e) => {
         type: 'result', grid: g.grid, road: g.road, w: g.w, h: g.h, bounds: g.bounds,
         mercX0: g.mercX0, mercY0: g.mercY0, mercCell: g.mercCell,
         reachableStops: g.reachableStops, cells: reach, runs: win.times.length,
-        km2: +(reach * (walk.cellM / 1000) ** 2).toFixed(1),
+        km2: +(reach * (walk.cellM / 1000) ** 2).toFixed(1), preview: !!m.preview,
         ms: Math.round(performance.now() - t0)
       }, [g.grid.buffer, g.road.buffer]);
       return;
