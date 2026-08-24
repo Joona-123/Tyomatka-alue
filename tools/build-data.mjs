@@ -248,16 +248,20 @@ log('Pysahdykset jarjestetty');
 
 /* ---------- 5. yhteydet ---------- */
 
-let cDep = [], cArr = [], cFrom = [], cTo = [], cTrip = [];
+let cDep = [], cArr = [], cFrom = [], cTo = [], cTrip = [], cSeq = [];
+let hop = 0, prevTrip = -1;
 for (let k = 0; k + 1 < orderArr.length; k++) {
   const a = orderArr[k], b = orderArr[k + 1];
   if (stTrip[a] !== stTrip[b]) continue;
+  if (stTrip[a] !== prevTrip) { prevTrip = stTrip[a]; hop = 0; }
+  const seq = hop++;                    // monesko valia tassa vuorossa
   const dep = stDep[a], arr = stArr[b];
   if (arr < dep) continue;              // rikkinainen rivi
   if (dep < WIN_START || dep > WIN_END) continue;
   if (stStop[a] === stStop[b]) continue;
   cDep.push(dep); cArr.push(arr);
   cFrom.push(stStop[a]); cTo.push(stStop[b]); cTrip.push(stTrip[a]);
+  cSeq.push(Math.min(65535, seq));
 }
 const nConn = cDep.length;
 log(`Yhteyksia: ${nConn}`);
@@ -268,12 +272,14 @@ const ci = Array.from({ length: nConn }, (_, i) => i);
 ci.sort((a, b) => cDep[b] - cDep[a]);
 
 const DEP = new Uint32Array(nConn), ARR = new Uint32Array(nConn),
-      FROM = new Uint32Array(nConn), TO = new Uint32Array(nConn), TRIP = new Uint32Array(nConn);
+      FROM = new Uint32Array(nConn), TO = new Uint32Array(nConn), TRIP = new Uint32Array(nConn),
+      SEQ = new Uint16Array(nConn);
 for (let k = 0; k < nConn; k++) {
   const i = ci[k];
   DEP[k] = cDep[i]; ARR[k] = cArr[i]; FROM[k] = cFrom[i]; TO[k] = cTo[i]; TRIP[k] = cTrip[i];
+  SEQ[k] = cSeq[i];
 }
-cDep = cArr = cFrom = cTo = cTrip = null;
+cDep = cArr = cFrom = cTo = cTrip = cSeq = null;
 log('Yhteydet jarjestetty laskevasti');
 
 /* ---------- 6. jalankulkuvaihdot (CSR) ---------- */
@@ -362,6 +368,7 @@ total += w('conn_arr.bin', b(ARR));
 total += w('conn_from.bin', b(FROM));
 total += w('conn_to.bin', b(TO));
 total += w('conn_trip.bin', b(TRIP));
+total += w('conn_seq.bin', b(SEQ));
 total += w('foot_start.bin', b(footStart));
 total += w('foot_to.bin', b(Uint32Array.from(fTo)));
 total += w('foot_sec.bin', b(Uint16Array.from(fSec)));

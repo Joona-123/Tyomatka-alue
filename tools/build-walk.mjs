@@ -55,6 +55,9 @@ console.log(`Ruudukko ${gw} x ${gh} (${CELL_M} m), ${(gw * gh / 1e6).toFixed(2)}
 if (gw * gh > 40e6) { console.error('VIRHE: ruudukko liian iso, kasvata CELL_M.'); process.exit(1); }
 
 const g = new Uint8Array(gw * gh);
+// Rataverkko omaan rasteriin bittilipuilla: 1 = rautatie, 2 = raitiotie, 4 = metro
+const rail = new Uint8Array(gw * gh);
+const RAIL_BIT = { rail: 1, light_rail: 1, narrow_gauge: 1, tram: 2, subway: 4, monorail: 4 };
 
 /* --- vektorigeometria piirtoa varten --- */
 const wayStart = [0];
@@ -129,6 +132,21 @@ function walkable(p) {
 }
 
 /* --- viivan rasterointi (Bresenham) --- */
+function railLine(ax, ay, bx, by, bit) {
+  let i0 = Math.round((ax - x0) / cell), j0 = Math.round((ay - y0) / cell);
+  const i1 = Math.round((bx - x0) / cell), j1 = Math.round((by - y0) / cell);
+  const dx = Math.abs(i1 - i0), sx = i0 < i1 ? 1 : -1;
+  const dy = -Math.abs(j1 - j0), sy = j0 < j1 ? 1 : -1;
+  let err = dx + dy;
+  for (let guard = 0; guard < 100000; guard++) {
+    if (i0 >= 0 && i0 < gw && j0 >= 0 && j0 < gh) rail[j0 * gw + i0] |= bit;
+    if (i0 === i1 && j0 === j1) break;
+    const e2 = 2 * err;
+    if (e2 >= dy) { err += dy; i0 += sx; }
+    if (e2 <= dx) { err += dx; j0 += sy; }
+  }
+}
+
 function line(ax, ay, bx, by) {
   let i0 = Math.round((ax - x0) / cell), j0 = Math.round((ay - y0) / cell);
   const i1 = Math.round((bx - x0) / cell), j1 = Math.round((by - y0) / cell);
@@ -149,7 +167,7 @@ const rl = readline.createInterface({
   input: fs.createReadStream(SEQ), crlfDelay: Infinity
 });
 
-let nWays = 0, nUsed = 0;
+let nWays = 0, nUsed = 0, nRail = 0;
 for await (let ln of rl) {
   if (!ln) continue;
   if (ln.charCodeAt(0) === 0x1e) ln = ln.slice(1);   // RS-erotin
@@ -157,11 +175,24 @@ for await (let ln of rl) {
   let f;
   try { f = JSON.parse(ln); } catch { continue; }
   nWays++;
-  if (!walkable(f.properties)) continue;
+  const P = f.properties || {};
   const geom = f.geometry;
   if (!geom) continue;
   const parts = geom.type === 'LineString' ? [geom.coordinates]
     : geom.type === 'MultiLineString' ? geom.coordinates : [];
+
+  // rataverkko
+  const bit = P.railway ? RAIL_BIT[P.railway] : 0;
+  if (bit && P.service !== 'yard' && P.service !== 'siding' && P.service !== 'spur') {
+    for (const co of parts) {
+      for (let k = 0; k + 1 < co.length; k++) {
+        railLine(toX(co[k][0]), toY(co[k][1]), toX(co[k + 1][0]), toY(co[k + 1][1]), bit);
+      }
+    }
+    nRail++;
+  }
+
+  if (!walkable(P)) continue;
   for (const co of parts) {
     const mp = co.map(c => [toX(c[0]), toY(c[1])]);
     for (let k = 0; k + 1 < mp.length; k++) line(mp[k][0], mp[k][1], mp[k + 1][0], mp[k + 1][1]);
@@ -169,7 +200,7 @@ for await (let ln of rl) {
   }
   nUsed++;
 }
-console.log(`Vaylia luettu: ${nWays}, kavelykelpoisia: ${nUsed}`);
+console.log(`Vaylia luettu: ${nWays}, kavelykelpoisia: ${nUsed}, rataosuuksia: ${nRail}`);
 
 /* --- levitys --- */
 for (let d = 0; d < DILATE; d++) {
@@ -202,6 +233,12 @@ const meta = {
   mercX0: x0, mercY0: y0, mercCell: cell,
   walkableFraction: on / g.length, roadCells: road
 };
+let railCells = 0;
+for (let i = 0; i < rail.length; i++) if (rail[i]) railCells++;
+fs.writeFileSync(path.join(OUT, 'rail_grid.bin'), Buffer.from(rail.buffer, 0, rail.byteLength));
+console.log(`Rataruutuja: ${railCells}`);
+meta.railCells = railCells;
+
 // vektoriviivat
 const nWaysOut = AX.length;
 const wb = (name, ta) => {
