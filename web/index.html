@@ -173,6 +173,10 @@ const map = new maplibregl.Map({
   center: [24.94, 60.19], zoom: 9, attributionControl: { compact: true }
 });
 map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
+map.on('load', ensureRouteLayers);
+
+// reittiviiva on aina päällimmäisenä: muut tasot lisätään sen alle
+const under = () => (map.getLayer('route-case') ? 'route-case' : undefined);
 
 let marker = null, work = null, meta = null, ready = false, pending = false;
 
@@ -316,18 +320,19 @@ function ensureLineLayers() {
     layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: {
       'line-color': '#0B1417',
-      'line-opacity': 0.85,
+      'line-opacity': 0.4,
       'line-width': ['interpolate', ['linear'], ['zoom'], 11.5, 3, 14, 7, 17, 15]
     }
-  });
+  }, under());
   map.addLayer({
     id: 'isoline', type: 'line', source: 'isoline', minzoom: VZ,
     layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: {
       'line-color': '#5FD3C4',
+      'line-opacity': 0.4,
       'line-width': ['interpolate', ['linear'], ['zoom'], 11.5, 1.4, 14, 4, 17, 10]
     }
-  });
+  }, under());
 }
 
 function updateLines(preview) {
@@ -435,7 +440,8 @@ function draw(r) {
     coordinates: [[W, N], [E, N], [E, S], [W, S]]
   });
   map.addLayer({ id: 'iso', type: 'raster', source: 'iso', maxzoom: VZ,
-    paint: { 'raster-opacity': 1, 'raster-resampling': 'nearest', 'raster-fade-duration': 0 } });
+    paint: { 'raster-opacity': 0.4, 'raster-resampling': 'nearest', 'raster-fade-duration': 0 }
+  }, under());
 
   $('#status').innerHTML =
     (r.noStops
@@ -455,7 +461,7 @@ function ensureRouteLayers() {
     id: 'route-case', type: 'line', source: 'route',
     layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: {
-      'line-color': '#081114', 'line-opacity': 0.9,
+      'line-color': '#081114', 'line-opacity': 1,
       'line-width': ['interpolate', ['linear'], ['zoom'], 9, 6, 14, 11, 17, 18]
     }
   });
@@ -464,7 +470,7 @@ function ensureRouteLayers() {
     filter: ['==', ['get', 'mode'], 'walk'],
     layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: {
-      'line-color': '#EDF3F4', 'line-dasharray': [0.4, 1.7],
+      'line-color': '#EDF3F4', 'line-opacity': 1, 'line-dasharray': [0.4, 1.7],
       'line-width': ['interpolate', ['linear'], ['zoom'], 9, 3, 14, 5.5, 17, 9]
     }
   });
@@ -473,7 +479,7 @@ function ensureRouteLayers() {
     filter: ['==', ['get', 'mode'], 'transit'],
     layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: {
-      'line-color': '#E8A33D',
+      'line-color': '#E8A33D', 'line-opacity': 1,
       'line-width': ['interpolate', ['linear'], ['zoom'], 9, 3.5, 14, 6.5, 17, 11]
     }
   });
