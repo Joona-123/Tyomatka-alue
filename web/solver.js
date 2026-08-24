@@ -165,6 +165,7 @@ export function reconstruct(D, res, ti, from, o) {
 
   const level0 = level;                       // lahtotaso talteen
   const depart = L[level0 * nStops + from];
+  if (depart < 0) return null;                // ei kelvollista lahtoa
   const legs = [];
   let s = from, t = depart, guard = 0;
 
@@ -203,7 +204,8 @@ export function reconstruct(D, res, ti, from, o) {
     let finIdx = -1, finBest = Infinity, xferIdx = -1;
     for (let m = k; m < end; m++) {
       const c = ti.list[m], q = TO[c], aq = ARR[c];
-      if (isTarget[q] && targetWalk[q] >= 0) {
+      // maalipysakki kelpaa vain jos silla on kelvollinen label tassa ajassa
+      if (isTarget[q] && targetWalk[q] >= 0 && L[q] >= aq) {
         const fin = aq + targetWalk[q];
         if (fin < finBest) { finBest = fin; finIdx = m; }
       }
@@ -280,8 +282,8 @@ export function buildGridWalk(D, transit, walk, o) {
             if (ok[jj * gw + ii] & 2) { i = ii; j = jj; found = true; break; }
           }
         }
-        if (found) { push(j * gw + i, 0, -1, maxTravel); originSeeded = true; }
-      } else { push(j * gw + i, 0, -1, maxTravel); originSeeded = true; }
+        if (found) { push(j * gw + i, 0, -1, maxWalkSec); originSeeded = true; }
+      } else { push(j * gw + i, 0, -1, maxWalkSec); originSeeded = true; }
     }
   }
 
@@ -317,7 +319,8 @@ export function buildGridWalk(D, transit, walk, o) {
       const cell = b[bi];
       if (dist[cell] !== d) continue;
       const st = seedT[cell], rem = seedR[cell];
-      if (st >= 0 && d - st > rem) continue;
+      const base = st > 0 ? st : 0;             // -1 = pelkka kavely, kaikki on kavelya
+      if (d - base > rem) continue;
       const j = (cell / gw) | 0, i = cell - j * gw;
       for (let dj = -1; dj <= 1; dj++) {
         const jj = j + dj; if (jj < 0 || jj >= gh) continue;
@@ -327,7 +330,7 @@ export function buildGridWalk(D, transit, walk, o) {
           const nc = jj * gw + ii;
           if (!(ok[nc] & 2)) continue;          // vain oikeat tiet
           const nd = d + ((di && dj) ? cDia : cOrt);
-          if (st >= 0 && nd - st > rem) continue;
+          if (nd - base > rem) continue;
           push(nc, nd, st, rem);
         }
       }
@@ -354,7 +357,10 @@ export function buildGridWalk(D, transit, walk, o) {
         }
       }
       if (bestD >= 0 && bestD + spread <= CAP) {
-        dist[c] = bestD + spread; seedT[c] = bestS; seedR[c] = seedR[bestN];
+        const bb = bestS > 0 ? bestS : 0;
+        if (bestD + spread - bb <= seedR[bestN]) {
+          dist[c] = bestD + spread; seedT[c] = bestS; seedR[c] = seedR[bestN];
+        }
       }
     }
   }
