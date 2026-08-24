@@ -930,3 +930,126 @@ export function routeOnWays(W, from, to, mask = 0, tries = 2) {
   }
   return null;
 }
+
+/**
+ * Reitittaa KOKO pysakkiketjun yhdessa aliverkossa.
+ *
+ * routeOnWays rakentaa oman aliverkon joka kutsulla. Kun sita kutsuttiin
+ * pysakkivali kerrallaan, kaksi ongelmaa seurasi:
+ *   1. perakkaiset kutsut napsauttivat saman pysakin ERI solmuun (aliverkot
+ *      erilaiset) -> viiva nykaisi muutaman metrin taaksepain
+ *   2. jos yhden valin reitti ei mahtunut aliverkkoon, se korvautui suoralla
+ *      viivalla -> pitka hyppy ilmassa
+ * Yksi yhteinen aliverkko poistaa molemmat.
+ *
+ * @returns {{coords:Array, stopPos:Array}|null}
+ *   coords  = yhtenainen viiva
+ *   stopPos = jokaisen pysakin sijainti VERKOLLA (piste osuu viivalle)
+ */
+export function routeChainOnWays(W, pts, mask = 0, tries = 3) {
+  if (!W || pts.length < 2) return null;
+  let ax0 = Infinity, ay0 = Infinity, ax1 = -Infinity, ay1 = -Infinity;
+  for (const p of pts) {
+    if (p[0] < ax0) ax0 = p[0];
+    if (p[0] > ax1) ax1 = p[0];
+    if (p[1] < ay0) ay0 = p[1];
+    if (p[1] > ay1) ay1 = p[1];
+  }
+  const span = Math.max(ax1 - ax0, ay1 - ay0);
+
+  for (let attempt = 0; attempt < tries; attempt++) {
+    const pad = Math.max(4000, span * (0.4 + attempt * 0.7));
+    const qx0 = ax0 - pad, qx1 = ax1 + pad, qy0 = ay0 - pad, qy1 = ay1 + pad;
+
+    const id = new Map();
+    const NX = [], NY = [], adj = [];
+    const node = (x, y) => {
+      const key = x * WKEY + y;
+      let i = id.get(key);
+      if (i === undefined) { i = NX.length; id.set(key, i); NX.push(x); NY.push(y); adj.push([]); }
+      return i;
+    };
+
+    const cand = [];
+    if (W.idx) {
+      const seenW = new Set();
+      const ia = Math.floor(qx0 / W.GS), ib = Math.floor(qx1 / W.GS);
+      const ja = Math.floor(qy0 / W.GS), jb = Math.floor(qy1 / W.GS);
+      for (let i = ia; i <= ib; i++) for (let j = ja; j <= jb; j++) {
+        const a = W.idx.get(i * 100000 + j);
+        if (!a) continue;
+        for (const k of a) if (!seenW.has(k)) { seenW.add(k); cand.push(k); }
+      }
+    } else {
+      for (let k = 0; k < W.n; k++) cand.push(k);
+    }
+
+    for (const k of cand) {
+      if (mask && !(W.kind[k] & mask)) continue;
+      if (W.bx1[k] < qx0 || W.bx0[k] > qx1 || W.by1[k] < qy0 || W.by0[k] > qy1) continue;
+      let x = W.ax[k], y = W.ay[k], prev = -1;
+      for (let j = W.start[k]; j < W.start[k + 1]; j++) {
+        x += W.dx[j]; y += W.dy[j];
+        const cur = node(x, y);
+        if (prev >= 0 && prev !== cur) {
+          const w = Math.hypot(NX[cur] - NX[prev], NY[cur] - NY[prev]);
+          adj[prev].push(cur, w);
+          adj[cur].push(prev, w);
+        }
+        prev = cur;
+      }
+    }
+    if (NX.length < 2) continue;
+
+    const near = p => {
+      let best = -1, bd = Infinity;
+      for (let i = 0; i < NX.length; i++) {
+        const d = (NX[i] - p[0]) ** 2 + (NY[i] - p[1]) ** 2;
+        if (d < bd) { bd = d; best = i; }
+      }
+      return best;
+    };
+
+    // Kaikki pysakit napsautetaan SAMASSA aliverkossa -> ei epajatkuvuuksia
+    const nodes = pts.map(near);
+    if (nodes.some(n => n < 0)) continue;
+
+    const path = (a, b) => {
+      if (a === b) return [a];
+      const dist = new Float64Array(NX.length).fill(Infinity);
+      const prevN = new Int32Array(NX.length).fill(-1);
+      const done = new Uint8Array(NX.length);
+      const h = Heap();
+      dist[a] = 0; h.push(0, a);
+      while (h.size()) {
+        const [d, u] = h.pop();
+        if (done[u]) continue;
+        done[u] = 1;
+        if (u === b) break;
+        const A = adj[u];
+        for (let i = 0; i < A.length; i += 2) {
+          const v = A[i], nd = d + A[i + 1];
+          if (nd < dist[v]) { dist[v] = nd; prevN[v] = u; h.push(nd, v); }
+        }
+      }
+      if (!isFinite(dist[b])) return null;
+      const out = [];
+      for (let c = b; c >= 0; c = prevN[c]) out.push(c);
+      return out.reverse();
+    };
+
+    const ll = i => [mercToLon(NX[i]), mercToLat(NY[i])];
+    const coords = [ll(nodes[0])];
+    const stopPos = [ll(nodes[0])];
+    let ok = true;
+    for (let i = 0; i + 1 < nodes.length; i++) {
+      const seg = path(nodes[i], nodes[i + 1]);
+      if (!seg) { ok = false; break; }
+      for (let j = 1; j < seg.length; j++) coords.push(ll(seg[j]));
+      stopPos.push(ll(nodes[i + 1]));
+    }
+    if (!ok || coords.length < 2) continue;
+    return { coords, stopPos };
+  }
+  return null;
+}

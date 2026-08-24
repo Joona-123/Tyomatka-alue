@@ -183,17 +183,10 @@ function railMask(rt) {
 /** Ajo-osuus rataverkkoa pitkin, pysakkivali kerrallaan. */
 function railGeom(stops, mask) {
   if (!railWays || !mask) return null;
-  const ll = s => [D.lon[s], D.lat[s]];
-  const out = [];
-  let hits = 0;
-  for (let k = 0; k + 1 < stops.length; k++) {
-    const a = ll(stops[k]), b = ll(stops[k + 1]);
-    const r = SV.routeOnWays(railWays, merc(a), merc(b), mask);
-    let seg = (r && r.coords.length >= 2) ? (hits++, r.coords) : [a, b];
-    if (out.length) seg = seg.slice(1);
-    out.push(...seg);
-  }
-  return hits > 0 && out.length >= 2 ? out : null;
+  // Koko ketju yhdessa aliverkossa: ei epajatkuvia liitoksia eika
+  // yksittaisen valin epaonnistumisesta syntyvia suoria hyppyja.
+  const pts = stops.map(s => merc([D.lon[s], D.lat[s]]));
+  return SV.routeChainOnWays(railWays, pts, mask, 3);
 }
 
 /** Koko matkan geometria: kavelyt verkkoa pitkin, ajo-osuudet pysakkiketjuna. */
@@ -220,8 +213,10 @@ function routeGeometry(legs, homeLL, workLL, walkMps, firstWalkSec) {
       }
       const rails = railGeom(chain, railMask(L.rt));
       segs.push({
-        mode: 'transit', coords: rails || pts,
-        stops: pts,                       // pysakit erikseen: viiva voi seurata rataa
+        mode: 'transit',
+        coords: rails ? rails.coords : pts,
+        // pysakit napsautettuna radalle, jotta pisteet osuvat viivalle
+        stops: rails ? rails.stopPos : pts,
         line: L.line, kind: L.kind, rt: L.rt == null ? 3 : L.rt
       });
       cursor = pts[pts.length - 1];
