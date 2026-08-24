@@ -198,6 +198,26 @@ function routeGeometry(legs, homeLL, workLL, walkMps, firstWalkSec) {
   return segs;
 }
 
+/**
+ * Lahto- ja tuloaika suoraan osuuksista. Palauttaa ok=false jos tulos ei ole
+ * jarkeva, jolloin kayttoliittyma nayttaa virheen eika vaarnaa lukua.
+ */
+function legSpan(legs, leadWalkSec, tailSec) {
+  if (!legs.length) return { ok: false, total: 0, leave: 0, arrive: 0 };
+  let dep = Infinity, arr = -Infinity;
+  for (const L of legs) {
+    if (Number.isFinite(L.dep) && L.dep < dep) dep = L.dep;
+    if (Number.isFinite(L.arr) && L.arr > arr) arr = L.arr;
+  }
+  if (!Number.isFinite(dep) || !Number.isFinite(arr)) {
+    return { ok: false, total: 0, leave: 0, arrive: 0 };
+  }
+  const leave = dep - (leadWalkSec || 0);
+  const arrive = arr + (tailSec || 0);
+  const total = arrive - leave;
+  return { ok: total >= 0 && total <= 24 * 3600, total, leave, arrive };
+}
+
 self.onmessage = async (e) => {
   const m = e.data;
   try {
@@ -220,11 +240,11 @@ self.onmessage = async (e) => {
         ? SV.csaWindowForward(D, {
             departFrom: m.arriveFrom, departTo: m.arriveTo, step: m.step,
             sources, minTransfer: m.minTransfer, maxTravel: m.maxTravel,
-            maxTransfers: m.maxTransfers })
+            maxTransfers: m.maxTransfers, maxWalkSec: m.maxWalkSec })
         : SV.csaWindow(D, {
             arriveFrom: m.arriveFrom, arriveTo: m.arriveTo, step: m.step,
             sources, minTransfer: m.minTransfer, maxTravel: m.maxTravel,
-            maxTransfers: m.maxTransfers });
+            maxTransfers: m.maxTransfers, maxWalkSec: m.maxWalkSec });
       last = { win, forward, maxTravel: m.maxTravel, walkMps: m.walkMps, maxWalkSec: m.maxWalkSec,
                grid: null, lat: m.lat, lon: m.lon };
 
@@ -234,7 +254,7 @@ self.onmessage = async (e) => {
       }
       const g = SV.buildGridWalk(D, win.transit, walk, {
         maxTravel: m.maxTravel, walkMps: m.walkMps, maxWalkSec: m.maxWalkSec,
-        origin: { lat: m.lat, lon: m.lon }
+        walkUsed: win.walkUsed, origin: { lat: m.lat, lon: m.lon }
       });
       if (!g) {
         self.postMessage({ type: 'result', empty: 'Mikään pysäkki ei ole saavutettavissa annetussa ajassa.' });
@@ -279,7 +299,8 @@ self.onmessage = async (e) => {
       const wt = walk
         ? SV.stopWalkTimes(D, walk, stopCell, m.lat, m.lon, last.maxWalkSec, last.walkMps)
         : SV.nearbyStops(D, m.lat, m.lon, last.maxWalkSec, effMps);
-      const b = SV.bestOriginNet(W.transit, wt, last.maxTravel);
+      const b = SV.bestOriginNet(W.transit, wt, last.maxTravel,
+                                 W.walkUsed, last.maxWalkSec);
 
       if (last.forward && b) {
         // Kotoa ulos: b.stop on MAALIpysakki, kavely siita napautettuun pisteeseen
@@ -291,11 +312,16 @@ self.onmessage = async (e) => {
             dep: r.arrival, arr: r.arrival + b.walkSec, sec: b.walkSec
           }]);
           const named = nameLegs(legs);
+          const span = legSpan(named, r.firstWalk, 0);
+          if (!span.ok) {
+            self.postMessage({ type: 'itinerary',
+              empty: `Matkan purku tuotti kelvottoman ajan (${Math.round(span.total / 60)} min).` });
+            return;
+          }
           self.postMessage({
             type: 'itinerary', legs: named,
             firstWalk: r.firstWalk, firstStop: D.name[r.firstStop],
-            leave: r.departure, arriveBy: r.arrival + b.walkSec,
-            total: r.arrival + b.walkSec - r.departure,
+            leave: span.leave, arriveBy: span.arrive, total: span.total,
             geometry: routeGeometry(named, [last.lon, last.lat], [m.lon, m.lat],
                                     last.walkMps, r.firstWalk)
           });
@@ -323,13 +349,19 @@ self.onmessage = async (e) => {
       const k = W.winner[b.stop];
       const r = SV.reconstruct(D, W.runs[k], ti, b.stop, { arriveBy: W.times[k] });
       if (!r) { self.postMessage({ type: 'itinerary', empty: 'Matkan purku epäonnistui.' }); return; }
-      const leave = r.departure - b.walkSec;
       const named = nameLegs(r.legs);
+      const span = legSpan(named, b.walkSec, 0);
+      if (!span.ok) {
+        self.postMessage({ type: 'itinerary',
+          empty: `Matkan purku tuotti kelvottoman ajan (${Math.round(span.total / 60)} min).` });
+        return;
+      }
+      const leave = span.leave;
       self.postMessage({
         type: 'itinerary',
         legs: named,
         firstWalk: b.walkSec, firstStop: D.name[b.stop],
-        leave, arriveBy: r.arrival, total: r.arrival - leave,
+        leave, arriveBy: span.arrive, total: span.total,
         geometry: routeGeometry(named, [m.lon, m.lat], [last.lon, last.lat], last.walkMps, b.walkSec)
       });
       return;
