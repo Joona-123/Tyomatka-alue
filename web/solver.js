@@ -69,9 +69,17 @@ export function csaBackward(D, o) {
 /* 2. Matkan rekonstruointi                                            */
 /* ------------------------------------------------------------------ */
 
-/** Vuoro -> sen yhteydet nousevassa lahtoaikajarjestyksessa (CSR). */
+/**
+ * Vuoro -> sen yhteydet vuoron sisaisessa jarjestyksessa (CSR).
+ *
+ * HUOM: aiemmin tama luotti globaaliin lahtoaikajarjestykseen ja kaansi sen.
+ * Se rikkoutuu heti kun kahdella saman vuoron perakkaisella valilla on sama
+ * lahtoaika, koska lajittelun tasapelijarjestys on maarittelematon -> pysakit
+ * tulivat vaaraan jarjestykseen. Nyt lajitellaan SEQ:n mukaan, joka on
+ * kirjoitettu suoraan stop_sequence-jarjestyksesta.
+ */
 export function tripIndex(D) {
-  const { TRIP } = D;
+  const { TRIP, SEQ, DEP } = D;
   const n = TRIP.length, nTrips = D.nTrips;
   const start = new Uint32Array(nTrips + 1);
   for (let i = 0; i < n; i++) start[TRIP[i] + 1]++;
@@ -79,9 +87,16 @@ export function tripIndex(D) {
   const list = new Uint32Array(n);
   const fill = start.slice();
   for (let i = 0; i < n; i++) list[fill[TRIP[i]]++] = i;
-  for (let t = 0; t < nTrips; t++) {         // laskeva -> nouseva
-    let a = start[t], b = start[t + 1] - 1;
-    while (a < b) { const x = list[a]; list[a] = list[b]; list[b] = x; a++; b--; }
+
+  const key = SEQ ? (i => SEQ[i]) : (i => DEP[i]);
+  const buf = [];
+  for (let t = 0; t < nTrips; t++) {
+    const a = start[t], b = start[t + 1];
+    if (b - a < 2) continue;
+    buf.length = 0;
+    for (let i = a; i < b; i++) buf.push(list[i]);
+    buf.sort((x, y) => key(x) - key(y));
+    for (let i = 0; i < buf.length; i++) list[a + i] = buf[i];
   }
   return { start, list };
 }
@@ -130,6 +145,7 @@ export function reconstruct(D, res, ti, from, o) {
 
     let alight = TO[ci], alightTime = ARR[ci], stops = 1;
     const path = [FROM[ci]];
+    if (k >= ti.start[trip + 1]) path.push(TO[ci]);   // varmistus: vuoroa ei loytynyt
     for (let m = k; m < ti.start[trip + 1]; m++) {
       const c = ti.list[m];
       alight = TO[c]; alightTime = ARR[c]; stops = m - k + 1;
@@ -347,18 +363,19 @@ export function csaWindow(D, o) {
 /* ------------------------------------------------------------------ */
 
 /** Ruudun indeksi koordinaateista, tarvittaessa lähimpään kuljettavaan napsautettuna. */
-export function cellIndex(walk, lon, lat, snap = 3) {
-  const { grid: ok, w: gw, h: gh, mercX0, mercY0, mercCell } = walk;
+export function cellIndex(walk, lon, lat, snap = 3, grid = null, mask = 0xff) {
+  const ok = grid || walk.grid;
+  const { w: gw, h: gh, mercX0, mercY0, mercCell } = walk;
   let i = Math.round((lonToMerc(lon) - mercX0) / mercCell);
   let j = Math.round((latToMerc(lat) - mercY0) / mercCell);
   if (i < 0 || i >= gw || j < 0 || j >= gh) return -1;
-  if (ok[j * gw + i]) return j * gw + i;
+  if (ok[j * gw + i] & mask) return j * gw + i;
   for (let r = 1; r <= snap; r++) {
     for (let dj = -r; dj <= r; dj++) {
       const jj = j + dj; if (jj < 0 || jj >= gh) continue;
       for (let di = -r; di <= r; di++) {
         const ii = i + di; if (ii < 0 || ii >= gw) continue;
-        if (ok[jj * gw + ii]) return jj * gw + ii;
+        if (ok[jj * gw + ii] & mask) return jj * gw + ii;
       }
     }
   }
@@ -369,7 +386,7 @@ export function cellIndex(walk, lon, lat, snap = 3) {
  * Rajattu Dial-haku yhdestä ruudusta. Palauttaa Mapin ruutu -> sekuntia.
  * Harva esitys, koska säde on pieni (satoja ruutuja).
  */
-export function walkNetwork(walk, startCell, maxSec, walkMps, withPrev = false) {
+export function walkNetwork(walk, startCell, maxSec, walkMps, withPrev = false, mask = 0xff) {
   const { grid: ok, w: gw, h: gh, cellM } = walk;
   if (startCell < 0) return null;
   const cOrt = Math.max(1, Math.round(cellM / walkMps));
@@ -399,7 +416,7 @@ export function walkNetwork(walk, startCell, maxSec, walkMps, withPrev = false) 
           if (!di && !dj) continue;
           const ii = i + di; if (ii < 0 || ii >= gw) continue;
           const nc = jj * gw + ii;
-          if (!ok[nc]) continue;
+          if (!(ok[nc] & mask)) continue;
           push(nc, d + ((di && dj) ? cDia : cOrt), c);
         }
       }

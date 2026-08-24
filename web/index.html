@@ -75,7 +75,7 @@
   .thead .s{font-size:11px;color:var(--muted)}
   .leg{display:flex;gap:9px;align-items:flex-start;padding:4px 0;font-size:12.5px}
   .leg .tm{font-family:var(--mono);font-size:12px;color:var(--muted);min-width:38px;padding-top:2px}
-  .leg .pill{font-family:var(--mono);font-size:12px;font-weight:700;color:#0B1417;
+  .leg .pill{font-family:var(--mono);font-size:12px;font-weight:700;color:#fff;
     background:var(--accent);border-radius:4px;padding:2px 7px;min-width:34px;text-align:center}
   .leg .pill.walk{background:transparent;color:var(--muted);border:1px dashed var(--line);font-weight:400}
   .leg .d{flex:1;line-height:1.35}
@@ -151,6 +151,24 @@
 <script type="module">
 const $ = s => document.querySelector(s);
 
+/* --- kulkuvälinevärit, HSL:n vakiintuneen jaon mukaan --- */
+const MODE_COLORS = [
+  0, '#00985F',    // ratikka
+  5, '#00985F',
+  900, '#00985F',
+  1, '#FF6319',    // metro
+  400, '#FF6319',
+  401, '#FF6319',
+  2, '#8C4799',    // juna
+  100, '#8C4799',
+  109, '#8C4799',
+  4, '#00B9E4',    // lautta
+  1000, '#00B9E4',
+  11, '#0074BE'    // johdinauto
+];
+const BUS_COLOR = '#0074BE';
+const transitColorExpr = () => ['match', ['get', 'rt'], ...MODE_COLORS, BUS_COLOR];
+
 /* --- värit: portaittaiset 5 min kaistat, reunimmainen lämmin = "juuri ja juuri" --- */
 const BANDS = ['#12414E','#1C5D6B','#2A7E88','#469E9C','#6DBBA8','#9CD4A6'];
 const EDGE  = '#E8A33D';
@@ -189,6 +207,18 @@ map.on('load', ensureRouteLayers);
 const under = () => (map.getLayer('route-case') ? 'route-case' : undefined);
 
 let marker = null, work = null, meta = null, ready = false, pending = false;
+
+const ICON_HOME = '<path d="M12 3.2 3.6 10.1v10.7h6.1v-6h4.6v6h6.1V10.1z"/>';
+const ICON_WORK = '<path d="M9.4 3.4h5.2q1.1 0 1.1 1.1v1.8h3.6q1.2 0 1.2 1.2v11q0 1.2-1.2 1.2H4.7q-1.2 0-1.2-1.2v-11q0-1.2 1.2-1.2h3.6V4.5q0-1.1 1.1-1.1m.9 2.9h3.4V5.2h-3.4z"/>';
+
+function pin(color, icon) {
+  const el = document.createElement('div');
+  el.style.cssText = 'width:34px;height:34px;display:grid;place-items:center;cursor:grab;' +
+    'border-radius:50%;background:' + color + ';border:2.5px solid #0B1417;' +
+    'box-shadow:0 2px 8px rgba(0,0,0,.55)';
+  el.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="#0B1417">' + icon + '</svg>';
+  return el;
+}
 
 let mode = 'work', home = null, homeMarker = null;
 let dir = 'toWork';
@@ -229,9 +259,7 @@ $('#mHome').onclick = () => setMode('home');
 function setHome(lat, lon) {
   home = { lat, lon };
   if (!homeMarker) {
-    const el = document.createElement('div');
-    el.style.cssText = 'width:13px;height:13px;border-radius:3px;background:#5FD3C4;' +
-      'border:2.5px solid #0F1A1E;transform:rotate(45deg)';
+    const el = pin('#5FD3C4', ICON_HOME);
     homeMarker = new maplibregl.Marker({ element: el, draggable: true }).setLngLat([lon, lat]).addTo(map);
     const upd = () => {
       const p = homeMarker.getLngLat();
@@ -247,9 +275,7 @@ function setHome(lat, lon) {
 function setWork(lat, lon) {
   work = { lat, lon };
   if (!marker) {
-    const el = document.createElement('div');
-    el.style.cssText = 'width:16px;height:16px;border-radius:50%;background:#E8A33D;' +
-      'border:2.5px solid #0F1A1E;box-shadow:0 0 0 1.5px #E8A33D';
+    const el = pin('#E8A33D', ICON_WORK);
     marker = new maplibregl.Marker({ element: el, draggable: true }).setLngLat([lon, lat]).addTo(map);
     marker.on('drag', () => {
       const p = marker.getLngLat(); work = { lat: p.lat, lon: p.lng };
@@ -349,7 +375,7 @@ function ensureLineLayers() {
     paint: {
       'line-color': '#0B1417',
       'line-opacity': 0.4,
-      'line-width': ['interpolate', ['linear'], ['zoom'], 11.5, 3, 14, 7, 17, 15]
+      'line-width': ['interpolate', ['linear'], ['zoom'], 11.5, 1.5, 14, 3.5, 17, 7.5]
     }
   }, under());
   map.addLayer({
@@ -358,7 +384,7 @@ function ensureLineLayers() {
     paint: {
       'line-color': '#5FD3C4',
       'line-opacity': 0.4,
-      'line-width': ['interpolate', ['linear'], ['zoom'], 11.5, 1.4, 14, 4, 17, 10]
+      'line-width': ['interpolate', ['linear'], ['zoom'], 11.5, 0.7, 14, 2, 17, 5]
     }
   }, under());
 }
@@ -480,6 +506,10 @@ function draw(r) {
   updateLines(r.preview);
 }
 
+function modeColor(rt) {
+  for (let i = 0; i < MODE_COLORS.length; i += 2) if (MODE_COLORS[i] === rt) return MODE_COLORS[i + 1];
+  return BUS_COLOR;
+}
 const hhmm = t => `${String(Math.floor(t / 3600) % 24).padStart(2, '0')}.${String(Math.floor(t / 60) % 60).padStart(2, '0')}`;
 
 function ensureRouteLayers() {
@@ -507,7 +537,7 @@ function ensureRouteLayers() {
     filter: ['==', ['get', 'mode'], 'transit'],
     layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: {
-      'line-color': '#E8A33D', 'line-opacity': 1,
+      'line-color': transitColorExpr(), 'line-opacity': 1,
       'line-width': ['interpolate', ['linear'], ['zoom'], 9, 3.5, 14, 6.5, 17, 11]
     }
   });
@@ -516,7 +546,7 @@ function ensureRouteLayers() {
     filter: ['==', ['geometry-type'], 'Point'],
     paint: {
       'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 3, 14, 5.5, 17, 8],
-      'circle-color': '#0F1A1E', 'circle-stroke-color': '#E8A33D', 'circle-stroke-width': 2.2
+      'circle-color': '#0F1A1E', 'circle-stroke-color': '#EDF3F4', 'circle-stroke-width': 2
     }
   });
 }
@@ -531,9 +561,9 @@ function drawRoute(geom) {
   const feats = [];
   for (const g of geom) {
     if (!g.coords || g.coords.length < 2) continue;
-    feats.push({ type: 'Feature', properties: { mode: g.mode }, geometry: { type: 'LineString', coordinates: g.coords } });
+    feats.push({ type: 'Feature', properties: { mode: g.mode, rt: g.rt == null ? 3 : g.rt }, geometry: { type: 'LineString', coordinates: g.coords } });
     if (g.mode === 'transit') {
-      for (const c of g.coords) feats.push({ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: c } });
+      for (const c of g.coords) feats.push({ type: 'Feature', properties: { rt: g.rt }, geometry: { type: 'Point', coordinates: c } });
     }
   }
   map.getSource('route').setData({ type: 'FeatureCollection', features: feats });
@@ -568,8 +598,9 @@ function drawTrip(m) {
            `<span class="d">${L.last ? 'Kävele työpaikalle' : 'Vaihto'} ` +
            `<small>${L.last ? 'perillä ' + hhmm(L.arr) : L.toName}</small></span></div>`;
     } else {
+      const col = modeColor(L.rt);
       h += `<div class="leg"><span class="tm">${hhmm(L.dep)}</span>` +
-           `<span class="pill">${L.line}</span>` +
+           `<span class="pill" style="background:${col}">${L.line}</span>` +
            `<span class="d">${L.kind}${L.head ? ' → ' + L.head : ''}<br>` +
            `<small>${L.fromName} → ${L.toName}, ${hhmm(L.arr)}</small></span></div>`;
     }
