@@ -382,8 +382,13 @@ worker.onmessage = ev => {
                     : `<span class="warn">kävelyrasteri puuttuu</span><br>`) +
       (meta.hasWays ? `katuverkko ${meta.nWays.toLocaleString('fi')} väylää<br>`
                     : `<span class="warn">katuverkko puuttuu — aja build uudelleen</span><br>`) +
-      `kävelyreititys: ${/OK/.test(meta.probe || '') ? '<b>' + meta.probe + '</b>'
+      `kävelyreititys: ${/^OK/.test(meta.probe || '') ? '<b>' + meta.probe + '</b>'
                         : '<span class="warn">' + (meta.probe || '?') + '</span>'}<br>` +
+      `ratareititys: ${/^OK/.test(meta.railProbe || '') ? '<b>' + meta.railProbe + '</b>'
+                        : '<span class="warn">' + (meta.railProbe || '?') + '</span>'}<br>` +
+      `route_type: ${Object.entries(meta.rtCount || {})
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, v]) => `${k}:${v}`).join(' ')}<br>` +
       (meta.hasRail ? `rataverkko ${meta.nRailWays.toLocaleString('fi')} osuutta<br>`
                     : `<span class="warn">rataverkko puuttuu — aja build uudelleen</span><br>`) +
       `Napauta karttaa asettaaksesi työpaikan.`;

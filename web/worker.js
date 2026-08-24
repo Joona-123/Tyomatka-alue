@@ -101,8 +101,32 @@ async function load(base) {
     }
   } else if (!walkWays) probe = 'katuverkkoa ei ladattu';
 
+  // route_type-jakauma: paljastaa heti jos data kayttaa arvoja joita
+  // railMask ei tunne (esim. ratikka 900 vs 0, lahijuna 109 vs 2).
+  const rtCount = {};
+  for (const t of D.routeType) rtCount[t] = (rtCount[t] || 0) + 1;
+
+  // Rataprobe: etsitaan ensimmainen raideliikenteen yhteys ja yritetaan
+  // reitittaa se rataverkkoa pitkin.
+  let railProbe = railWays ? 'ei raideliikennettä datassa' : 'rataverkkoa ei ladattu';
+  if (railWays) {
+    for (let i = 0; i < D.TRIP.length; i++) {
+      const rt = D.routeType[D.tripRoute[D.TRIP[i]]];
+      const mk = railMask(rt);
+      if (!mk) continue;
+      const a = D.FROM[i], b2 = D.TO[i];
+      if (a === b2) continue;
+      const r = SV.routeOnWays(railWays,
+        merc([D.lon[a], D.lat[a]]), merc([D.lon[b2], D.lat[b2]]), mk, 3);
+      railProbe = r
+        ? `OK (rt ${rt}, maski ${mk}, ${r.coords.length} pistettä)`
+        : `EPÄONNISTUI (rt ${rt}, maski ${mk}) — rataa ei löydy pysäkkien läheltä`;
+      break;
+    }
+  }
+
   return { ...meta, ver: VER, hasWalk: !!walk, walkCells: walk ? walk.w * walk.h : 0,
-           hasRail: !!railWays, hasWays: !!walkWays, probe,
+           hasRail: !!railWays, hasWays: !!walkWays, probe, railProbe, rtCount,
            nWays: walkWays ? walkWays.n : 0, nRailWays: railWays ? railWays.n : 0 };
 }
 
