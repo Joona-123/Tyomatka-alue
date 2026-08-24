@@ -35,32 +35,37 @@ export function csaBackward(D, o) {
     ? 6 : Math.max(1, Math.min(6, o.maxTransfers + 1));
   const nLevels = maxBoards + 1;
 
+  // Kavelybudjetti koskee KOKO matkaa, ei yksittaista osuutta.
+  const maxWalk = o.maxWalkSec == null ? 1e9 : o.maxWalkSec;
+
   const L = new Int32Array(nLevels * nStops).fill(-1);
   const VC = new Int32Array(nLevels * nStops).fill(-1);
   const VF = new Int32Array(nLevels * nStops).fill(-1);
+  const WK = new Int32Array(nLevels * nStops).fill(0);   // kavelya talta pysakilta maaliin
   const onTripL = new Uint8Array(nLevels * nTrips);
   const isTarget = new Uint8Array(nStops);
   const targetWalk = new Int32Array(nStops).fill(-1);
 
   // Paivitys tasolle b leviaa aina ylospain: >=b nousua sallivat tasot
   // saavat saman vaihtoehdon ilmaiseksi. Katkaisu sailyttaa monotonisuuden.
-  const put = (b, s, time, conn, foot) => {
+  const put = (b, s, time, conn, foot, walk) => {
+    if (walk > maxWalk) return;              // budjetti ylittyy -> label kelvoton
     for (let bb = b; bb < nLevels; bb++) {
       const off = bb * nStops + s;
       if (time <= L[off]) break;
-      L[off] = time; VC[off] = conn; VF[off] = foot;
+      L[off] = time; VC[off] = conn; VF[off] = foot; WK[off] = walk;
     }
   };
 
   for (const [s, walkSec] of o.sources) {
     isTarget[s] = 1;
     if (targetWalk[s] < 0 || walkSec < targetWalk[s]) targetWalk[s] = walkSec;
-    put(0, s, o.arriveBy - walkSec, -1, -1);
+    put(0, s, o.arriveBy - walkSec, -1, -1, walkSec);
   }
   for (const [s] of o.sources) {
-    const base = L[s];
+    const base = L[s], bw = WK[s];
     for (let j = footStart[s], e = footStart[s + 1]; j < e; j++) {
-      put(0, footTo[j], base - footSec[j], -1, s);
+      put(0, footTo[j], base - footSec[j], -1, s, bw + footSec[j]);
     }
   }
 
@@ -80,10 +85,12 @@ export function csaBackward(D, o) {
       if (!usable) continue;
       onTripL[ti2] = 1;
 
+      const wk = WK[(b - 1) * nStops + t];      // kavely poistumisen jalkeen
+      if (wk > maxWalk) continue;
       if (dep > L[b * nStops + f]) {
-        put(b, f, dep, i, -1);
+        put(b, f, dep, i, -1, wk);
         for (let j = footStart[f], e = footStart[f + 1]; j < e; j++) {
-          put(b, footTo[j], dep - footSec[j], -1, f);
+          put(b, footTo[j], dep - footSec[j], -1, f, wk + footSec[j]);
         }
       }
     }
@@ -94,7 +101,8 @@ export function csaBackward(D, o) {
     latest: L.subarray(top, top + nStops),
     viaConn: VC.subarray(top, top + nStops),
     viaFoot: VF.subarray(top, top + nStops),
-    L, VC, VF, nLevels, nStops,
+    walkUsed: WK.subarray(top, top + nStops),
+    L, VC, VF, WK, nLevels, nStops,
     isTarget, targetWalk, arriveBy: o.arriveBy
   };
 }
@@ -155,14 +163,16 @@ export function reconstruct(D, res, ti, from, o) {
     if (L[b * nStops + from] === best) { level = b; break; }
   }
 
+  const level0 = level;                       // lahtotaso talteen
+  const depart = L[level0 * nStops + from];
   const legs = [];
-  let s = from, t = L[level * nStops + s], guard = 0;
+  let s = from, t = depart, guard = 0;
 
   const finish = () => {
     const wsec = targetWalk[s] >= 0 ? targetWalk[s] : 0;
     legs.push({ mode: 'walk', last: true, fromStop: s, toStop: -1,
                 dep: t, arr: t + wsec, sec: wsec });
-    return { legs, departure: L[level * nStops + from], arrival: t + wsec };
+    return { legs, departure: depart, arrival: t + wsec };
   };
 
   while (guard++ < 100) {
@@ -184,18 +194,36 @@ export function reconstruct(D, res, ti, from, o) {
     while (k < ti.start[trip + 1] && ti.list[k] !== ci) k++;
 
     const lo = (level - 1) * nStops;           // poistumisen jalkeen yksi nousu vahemman
+    const end = ti.start[trip + 1];
+
+    // Kaydaan koko ajo lapi ja valitaan poistumispysakki joka minimoi
+    // TODELLISEN perilletuloajan. Aiemmin poistuttiin ensimmaisella
+    // maalipysakilla, jolloin isompi kavelyraja sai jaamaan pois liian
+    // aikaisin ja kavelemaan turhaan -> matka-aika kasvoi rajaa nostamalla.
+    let finIdx = -1, finBest = Infinity, xferIdx = -1;
+    for (let m = k; m < end; m++) {
+      const c = ti.list[m], q = TO[c], aq = ARR[c];
+      if (isTarget[q] && targetWalk[q] >= 0) {
+        const fin = aq + targetWalk[q];
+        if (fin < finBest) { finBest = fin; finIdx = m; }
+      }
+      if (xferIdx < 0 && L[lo + q] >= aq) {
+        const nx = VC[lo + q];
+        if (VF[lo + q] >= 0 || (nx >= 0 && TRIP[nx] !== trip)) xferIdx = m;
+      }
+    }
+    // Perille asti pääsy voittaa vaihdon, kunhan määräaika pitää
+    let stopAt = (finIdx >= 0 && finBest <= o.arriveBy) ? finIdx
+               : (xferIdx >= 0 ? xferIdx : (finIdx >= 0 ? finIdx : end - 1));
+    if (stopAt < k) stopAt = k;
+
     let alight = TO[ci], alightTime = ARR[ci], stops = 1;
     const path = [FROM[ci]];
-    if (k >= ti.start[trip + 1]) path.push(TO[ci]);
-    for (let m = k; m < ti.start[trip + 1]; m++) {
+    if (k >= end) path.push(TO[ci]);
+    for (let m = k; m <= stopAt && m < end; m++) {
       const c = ti.list[m];
       alight = TO[c]; alightTime = ARR[c]; stops = m - k + 1;
       path.push(alight);
-      if (isTarget[alight]) break;
-      if (L[lo + alight] >= alightTime) {
-        const nx = VC[lo + alight];
-        if (VF[lo + alight] >= 0 || (nx >= 0 && TRIP[nx] !== trip)) break;
-      }
     }
 
     legs.push({
@@ -207,7 +235,7 @@ export function reconstruct(D, res, ti, from, o) {
     s = alight; t = alightTime; level--;
   }
 
-  return { legs, departure: L[(nLevels - 1) * nStops + from], arrival: o.arriveBy };
+  return { legs, departure: depart, arrival: o.arriveBy };
 }
 
 /* ------------------------------------------------------------------ */
@@ -217,6 +245,7 @@ export function reconstruct(D, res, ti, from, o) {
 /** @param transit Int32Array: joukkoliikenneosuus sekunteina per pysakki, -1 = ei saavutettavissa */
 export function buildGridWalk(D, transit, walk, o) {
   const { maxTravel, walkMps, maxWalkSec, origin } = o;
+  const used = o.walkUsed;    // matkan aikana jo kaytetty kavely per pysakki
   const { grid: ok, w: gw, h: gh, mercX0, mercY0, mercCell, cellM } = walk;
 
   const cOrt = Math.max(1, Math.round(cellM / walkMps));
@@ -225,12 +254,13 @@ export function buildGridWalk(D, transit, walk, o) {
 
   const dist = new Int32Array(gw * gh).fill(-1);
   const seedT = new Int32Array(gw * gh);
+  const seedR = new Int32Array(gw * gh);    // kavelybudjettia jaljella kotipaahan
   const buckets = new Array(CAP + 1);
 
-  const push = (cell, d, st) => {
+  const push = (cell, d, st, rem) => {
     if (d > CAP) return;
     if (dist[cell] >= 0 && dist[cell] <= d) return;
-    dist[cell] = d; seedT[cell] = st;
+    dist[cell] = d; seedT[cell] = st; seedR[cell] = rem;
     (buckets[d] || (buckets[d] = [])).push(cell);
   };
 
@@ -250,8 +280,8 @@ export function buildGridWalk(D, transit, walk, o) {
             if (ok[jj * gw + ii] & 2) { i = ii; j = jj; found = true; break; }
           }
         }
-        if (found) { push(j * gw + i, 0, -1); originSeeded = true; }
-      } else { push(j * gw + i, 0, -1); originSeeded = true; }
+        if (found) { push(j * gw + i, 0, -1, maxTravel); originSeeded = true; }
+      } else { push(j * gw + i, 0, -1, maxTravel); originSeeded = true; }
     }
   }
 
@@ -273,7 +303,9 @@ export function buildGridWalk(D, transit, walk, o) {
       if (!found) continue;
     }
     const tr = transit[s];
-    push(j * gw + i, tr, tr);
+    const rem = maxWalkSec - (used ? used[s] : 0);
+    if (rem < 0) continue;               // kavelybudjetti loppui jo tyopaikan paassa
+    push(j * gw + i, tr, tr, rem);
     seeded++;
   }
   if (!seeded && !originSeeded) return null;
@@ -284,8 +316,8 @@ export function buildGridWalk(D, transit, walk, o) {
     for (let bi = 0; bi < b.length; bi++) {
       const cell = b[bi];
       if (dist[cell] !== d) continue;
-      const st = seedT[cell];
-      if (st >= 0 && d - st > maxWalkSec) continue;
+      const st = seedT[cell], rem = seedR[cell];
+      if (st >= 0 && d - st > rem) continue;
       const j = (cell / gw) | 0, i = cell - j * gw;
       for (let dj = -1; dj <= 1; dj++) {
         const jj = j + dj; if (jj < 0 || jj >= gh) continue;
@@ -295,8 +327,8 @@ export function buildGridWalk(D, transit, walk, o) {
           const nc = jj * gw + ii;
           if (!(ok[nc] & 2)) continue;          // vain oikeat tiet
           const nd = d + ((di && dj) ? cDia : cOrt);
-          if (st >= 0 && nd - st > maxWalkSec) continue;
-          push(nc, nd, st);
+          if (st >= 0 && nd - st > rem) continue;
+          push(nc, nd, st, rem);
         }
       }
     }
@@ -311,17 +343,19 @@ export function buildGridWalk(D, transit, walk, o) {
     for (let i = 0; i < gw; i++) {
       const c = j * gw + i;
       if (base[c] >= 0 || !ok[c]) continue;
-      let bestD = -1, bestS = 0;
+      let bestD = -1, bestS = 0, bestN = 0;
       for (let dj = -1; dj <= 1; dj++) {
         const jj = j + dj; if (jj < 0 || jj >= gh) continue;
         for (let di = -1; di <= 1; di++) {
           const ii = i + di; if (ii < 0 || ii >= gw) continue;
           const n = jj * gw + ii;
           if (base[n] < 0) continue;
-          if (bestD < 0 || base[n] < bestD) { bestD = base[n]; bestS = seedT[n]; }
+          if (bestD < 0 || base[n] < bestD) { bestD = base[n]; bestS = seedT[n]; bestN = n; }
         }
       }
-      if (bestD >= 0 && bestD + spread <= CAP) { dist[c] = bestD + spread; seedT[c] = bestS; }
+      if (bestD >= 0 && bestD + spread <= CAP) {
+        dist[c] = bestD + spread; seedT[c] = bestS; seedR[c] = seedR[bestN];
+      }
     }
   }
 
@@ -400,6 +434,7 @@ export function csaWindow(D, o) {
   if (!times.length) times.push(o.arriveTo);
 
   const transit = new Int32Array(D.nStops).fill(-1);
+  const walkUsed = new Int32Array(D.nStops).fill(0);
   const winner = new Int32Array(D.nStops).fill(-1);
   const runs = [];
 
@@ -407,7 +442,8 @@ export function csaWindow(D, o) {
     const arriveBy = times[k];
     const res = csaBackward(D, {
       arriveBy, sources: o.sources, minTransfer: o.minTransfer,
-      maxTransfers: o.maxTransfers, earliest: arriveBy - o.maxTravel
+      maxTransfers: o.maxTransfers, maxWalkSec: o.maxWalkSec,
+      earliest: arriveBy - o.maxTravel
     });
     runs.push(res);
     const L = res.latest;
@@ -415,10 +451,12 @@ export function csaWindow(D, o) {
       if (L[s] < 0) continue;
       const tt = arriveBy - L[s];
       if (tt < 0 || tt > o.maxTravel) continue;
-      if (transit[s] < 0 || tt < transit[s]) { transit[s] = tt; winner[s] = k; }
+      if (transit[s] < 0 || tt < transit[s]) {
+        transit[s] = tt; winner[s] = k; walkUsed[s] = res.walkUsed[s];
+      }
     }
   }
-  return { transit, winner, runs, times };
+  return { transit, walkUsed, winner, runs, times };
 }
 
 /* ------------------------------------------------------------------ */
@@ -544,12 +582,14 @@ export function stopWalkTimes(D, walk, stopCell, lat, lon, maxSec, walkMps) {
 }
 
 /** Paras lähtöpysäkki, kun kävelyajat on jo laskettu verkosta. */
-export function bestOriginNet(transit, walkTimes, maxTravel) {
+export function bestOriginNet(transit, walkTimes, maxTravel, walkUsed, maxWalkSec) {
   let best = null;
   for (const [s, walkSec] of walkTimes) {
     if (transit[s] < 0) continue;
     const total = transit[s] + walkSec;
     if (total > maxTravel) continue;
+    // koko matkan kavely, ei vain tama osuus
+    if (walkUsed && maxWalkSec != null && walkUsed[s] + walkSec > maxWalkSec) continue;
     if (!best || total < best.total) best = { stop: s, walkSec, total };
   }
   return best;
@@ -571,30 +611,34 @@ export function csaForward(D, o) {
     ? 6 : Math.max(1, Math.min(6, o.maxTransfers + 1));
   const nLevels = maxBoards + 1;
 
+  const maxWalk = o.maxWalkSec == null ? 1e9 : o.maxWalkSec;
+
   const E = new Int32Array(nLevels * nStops).fill(INF32);
   const VC = new Int32Array(nLevels * nStops).fill(-1);
   const VF = new Int32Array(nLevels * nStops).fill(-1);
+  const WK = new Int32Array(nLevels * nStops).fill(0);
   const onTripL = new Uint8Array(nLevels * nTrips);
   const isSource = new Uint8Array(nStops);
   const sourceWalk = new Int32Array(nStops).fill(-1);
 
-  const put = (b, s, time, conn, foot) => {
+  const put = (b, s, time, conn, foot, walk) => {
+    if (walk > maxWalk) return;
     for (let bb = b; bb < nLevels; bb++) {
       const off = bb * nStops + s;
       if (time >= E[off]) break;
-      E[off] = time; VC[off] = conn; VF[off] = foot;
+      E[off] = time; VC[off] = conn; VF[off] = foot; WK[off] = walk;
     }
   };
 
   for (const [s, walkSec] of o.sources) {
     isSource[s] = 1;
     if (sourceWalk[s] < 0 || walkSec < sourceWalk[s]) sourceWalk[s] = walkSec;
-    put(0, s, o.departAt + walkSec, -1, -1);
+    put(0, s, o.departAt + walkSec, -1, -1, walkSec);
   }
   for (const [s] of o.sources) {
-    const base = E[s];
+    const base = E[s], bw = WK[s];
     for (let j = footStart[s], e = footStart[s + 1]; j < e; j++) {
-      put(0, footTo[j], base + footSec[j], -1, s);
+      put(0, footTo[j], base + footSec[j], -1, s, bw + footSec[j]);
     }
   }
 
@@ -615,10 +659,12 @@ export function csaForward(D, o) {
       if (!usable) continue;
       onTripL[ti2] = 1;
 
+      const wk = WK[(b - 1) * nStops + f];
+      if (wk > maxWalk) continue;
       if (arr < E[b * nStops + t]) {
-        put(b, t, arr, i, -1);
+        put(b, t, arr, i, -1, wk);
         for (let j = footStart[t], e2 = footStart[t + 1]; j < e2; j++) {
-          put(b, footTo[j], arr + footSec[j], -1, t);
+          put(b, footTo[j], arr + footSec[j], -1, t, wk + footSec[j]);
         }
       }
     }
@@ -627,7 +673,8 @@ export function csaForward(D, o) {
   const top = maxBoards * nStops;
   return {
     earliest: E.subarray(top, top + nStops),
-    E, VC, VF, nLevels, nStops,
+    walkUsed: WK.subarray(top, top + nStops),
+    E, VC, VF, WK, nLevels, nStops,
     isSource, sourceWalk, departAt: o.departAt
   };
 }
@@ -638,12 +685,13 @@ export function csaWindowForward(D, o) {
   if (!times.length) times.push(o.departFrom);
 
   const transit = new Int32Array(D.nStops).fill(-1);
+  const walkUsed = new Int32Array(D.nStops).fill(0);
   const winner = new Int32Array(D.nStops).fill(-1);
   const runs = [];
   for (let k = 0; k < times.length; k++) {
     const res = csaForward(D, {
       departAt: times[k], sources: o.sources, maxTransfers: o.maxTransfers,
-      minTransfer: o.minTransfer, maxTravel: o.maxTravel
+      minTransfer: o.minTransfer, maxTravel: o.maxTravel, maxWalkSec: o.maxWalkSec
     });
     runs.push(res);
     const E = res.earliest;
@@ -651,10 +699,12 @@ export function csaWindowForward(D, o) {
       if (E[s] === INF32) continue;
       const tt = E[s] - times[k];
       if (tt < 0 || tt > o.maxTravel) continue;
-      if (transit[s] < 0 || tt < transit[s]) { transit[s] = tt; winner[s] = k; }
+      if (transit[s] < 0 || tt < transit[s]) {
+        transit[s] = tt; winner[s] = k; walkUsed[s] = res.walkUsed[s];
+      }
     }
   }
-  return { transit, winner, runs, times, forward: true };
+  return { transit, walkUsed, winner, runs, times, forward: true };
 }
 
 /** Purkaa matkan lahtopaikasta annetulle pysakille. */

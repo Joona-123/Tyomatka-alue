@@ -4,12 +4,15 @@ let D = null, meta = null, walk = null, ti = null, stopCell = null;
 let walkWays = null, railWays = null;
 let last = null;   // viimeisin ratkaisu matkaehdotusta varten
 
+let VER = '';   // build-tunniste, estaa selainta tarjoamasta vanhoja binaareja
+
 async function bin(base, name, Type, tries = 4) {
   let err = '';
+  const url = `${base}/${name}${VER ? '?v=' + VER : ''}`;
   for (let i = 0; i < tries; i++) {
     if (i) await new Promise(r => setTimeout(r, 400 * 2 ** i));
     let r;
-    try { r = await fetch(`${base}/${name}`); }
+    try { r = await fetch(url); }
     catch (e) { err = String(e.message || e); continue; }
     if (r.ok) return new Type(await r.arrayBuffer());
     err = `HTTP ${r.status}`;
@@ -17,12 +20,19 @@ async function bin(base, name, Type, tries = 4) {
   }
   throw new Error(`${name}: ${err}`);
 }
-const json = (base, n) => fetch(`${base}/${n}`).then(r => {
+const json = (base, n) => fetch(`${base}/${n}${VER ? '?v=' + VER : ''}`,
+  { cache: 'no-cache' }).then(r => {
   if (!r.ok) throw new Error(`${n}: HTTP ${r.status}`);
   return r.json();
 });
 
 async function load(base) {
+  // meta ensin ilman valimuistia -> saadaan build-tunniste versioinniksi
+  try {
+    const m0 = await json(base, 'meta.json');
+    VER = String(m0.built || '').replace(/[^0-9]/g, '').slice(0, 14);
+  } catch { VER = String(Date.now()); }
+
   const [dep, arr, from, to, trip, fst, seq, fto, fsec, stops, m, routes, trips] = await Promise.all([
     bin(base, 'conn_dep.bin', Uint32Array), bin(base, 'conn_arr.bin', Uint32Array),
     bin(base, 'conn_from.bin', Uint32Array), bin(base, 'conn_to.bin', Uint32Array),
@@ -70,8 +80,27 @@ async function load(base) {
   catch (e) { walkWays = null; meta.wayError = String(e.message || e); }
   try { railWays = await ways('rway'); }
   catch (e) { railWays = null; meta.railError = String(e.message || e); }
-  return { ...meta, hasWalk: !!walk, walkCells: walk ? walk.w * walk.h : 0,
-           hasRail: !!railWays, hasWays: !!walkWays,
+  // Itsetesti: reititetaan kahden lahekkaisen pysakin valilla ja katsotaan
+  // tuleeko verkkoreitti vai suora. Nain kayttoliittyma voi kertoa totuuden.
+  let probe = 'ei testattu';
+  if (walkWays && D.nStops > 1) {
+    let a = -1, b = -1;
+    for (let s2 = 1; s2 < D.nStops && a < 0; s2++) {
+      const dx = (D.lon[s2] - D.lon[0]) * 55000, dy = (D.lat[s2] - D.lat[0]) * 111320;
+      if (Math.hypot(dx, dy) > 250 && Math.hypot(dx, dy) < 1500) { a = 0; b = s2; }
+    }
+    if (b > 0) {
+      const p1 = [SV.lonToMerc(D.lon[a]), SV.latToMerc(D.lat[a])];
+      const p2 = [SV.lonToMerc(D.lon[b]), SV.latToMerc(D.lat[b])];
+      const r = SV.routeOnWays(walkWays, p1, p2, 0, 3);
+      const straight = Math.hypot(p2[0] - p1[0], p2[1] - p1[1]);
+      probe = r ? `OK, mutka ${(r.merc / straight).toFixed(2)}x (${r.coords.length} pistettä)`
+                : 'EPÄONNISTUI — verkko ei yhdistä';
+    }
+  } else if (!walkWays) probe = 'katuverkkoa ei ladattu';
+
+  return { ...meta, ver: VER, hasWalk: !!walk, walkCells: walk ? walk.w * walk.h : 0,
+           hasRail: !!railWays, hasWays: !!walkWays, probe,
            nWays: walkWays ? walkWays.n : 0, nRailWays: railWays ? railWays.n : 0 };
 }
 
@@ -102,10 +131,12 @@ function nameLegs(legs) {
 const merc = ll => [SV.lonToMerc(ll[0]), SV.latToMerc(ll[1])];
 
 /** Kavelyreitti oikeaa katuverkkoa pitkin. */
+let lastWalkExact = true;
+
 function walkGeom(fromLL, toLL) {
-  if (!walkWays) return [fromLL, toLL];
-  const r = SV.routeOnWays(walkWays, merc(fromLL), merc(toLL), 0);
-  if (!r || r.coords.length < 2) return [fromLL, toLL];
+  if (!walkWays) { lastWalkExact = false; return [fromLL, toLL]; }
+  const r = SV.routeOnWays(walkWays, merc(fromLL), merc(toLL), 0, 3);
+  if (!r || r.coords.length < 2) { lastWalkExact = false; return [fromLL, toLL]; }
   return [fromLL, ...r.coords, toLL];
 }
 
@@ -137,6 +168,7 @@ function railGeom(stops, mask) {
 /** Koko matkan geometria: kavelyt verkkoa pitkin, ajo-osuudet pysakkiketjuna. */
 function routeGeometry(legs, homeLL, workLL, walkMps, firstWalkSec) {
   const segs = [];
+  const mark = coords => { const e = lastWalkExact; lastWalkExact = true; return e; };
   const ll = s => [D.lon[s], D.lat[s]];
   let cursor = homeLL;
   let lead = firstWalkSec || 900;
@@ -144,7 +176,8 @@ function routeGeometry(legs, homeLL, workLL, walkMps, firstWalkSec) {
   for (const L of legs) {
     if (L.mode === 'walk') {
       const to = L.last ? workLL : ll(L.toStop);
-      segs.push({ mode: 'walk', coords: walkGeom(cursor, to, L.sec || 300, walkMps) });
+      const c = walkGeom(cursor, to);
+      segs.push({ mode: 'walk', coords: c, exact: mark() });
       cursor = to;
     } else {
       const chain = (L.path && L.path.length > 1) ? L.path : [L.fromStop, L.toStop];
@@ -187,11 +220,11 @@ self.onmessage = async (e) => {
         ? SV.csaWindowForward(D, {
             departFrom: m.arriveFrom, departTo: m.arriveTo, step: m.step,
             sources, minTransfer: m.minTransfer, maxTravel: m.maxTravel,
-            maxTransfers: m.maxTransfers })
+            maxTransfers: m.maxTransfers, maxWalkSec: m.maxWalkSec })
         : SV.csaWindow(D, {
             arriveFrom: m.arriveFrom, arriveTo: m.arriveTo, step: m.step,
             sources, minTransfer: m.minTransfer, maxTravel: m.maxTravel,
-            maxTransfers: m.maxTransfers });
+            maxTransfers: m.maxTransfers, maxWalkSec: m.maxWalkSec });
       last = { win, forward, maxTravel: m.maxTravel, walkMps: m.walkMps, maxWalkSec: m.maxWalkSec,
                grid: null, lat: m.lat, lon: m.lon };
 
@@ -201,7 +234,7 @@ self.onmessage = async (e) => {
       }
       const g = SV.buildGridWalk(D, win.transit, walk, {
         maxTravel: m.maxTravel, walkMps: m.walkMps, maxWalkSec: m.maxWalkSec,
-        origin: { lat: m.lat, lon: m.lon }
+        walkUsed: win.walkUsed, origin: { lat: m.lat, lon: m.lon }
       });
       if (!g) {
         self.postMessage({ type: 'result', empty: 'Mikään pysäkki ei ole saavutettavissa annetussa ajassa.' });
@@ -246,7 +279,8 @@ self.onmessage = async (e) => {
       const wt = walk
         ? SV.stopWalkTimes(D, walk, stopCell, m.lat, m.lon, last.maxWalkSec, last.walkMps)
         : SV.nearbyStops(D, m.lat, m.lon, last.maxWalkSec, effMps);
-      const b = SV.bestOriginNet(W.transit, wt, last.maxTravel);
+      const b = SV.bestOriginNet(W.transit, wt, last.maxTravel,
+                                 W.walkUsed, last.maxWalkSec);
 
       if (last.forward && b) {
         // Kotoa ulos: b.stop on MAALIpysakki, kavely siita napautettuun pisteeseen
@@ -280,7 +314,8 @@ self.onmessage = async (e) => {
           firstWalk: 0, firstStop: null,
           leave: arr - walkTotal, arriveBy: arr, total: walkTotal,
           geometry: [{ mode: 'walk',
-            coords: walkGeom([m.lon, m.lat], [last.lon, last.lat]) }]
+            coords: walkGeom([m.lon, m.lat], [last.lon, last.lat]),
+            exact: lastWalkExact }]
         });
         return;
       }
