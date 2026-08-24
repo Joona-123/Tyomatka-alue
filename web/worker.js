@@ -221,6 +221,7 @@ function routeGeometry(legs, homeLL, workLL, walkMps, firstWalkSec) {
       const rails = railGeom(chain, railMask(L.rt));
       segs.push({
         mode: 'transit', coords: rails || pts,
+        stops: pts,                       // pysakit erikseen: viiva voi seurata rataa
         line: L.line, kind: L.kind, rt: L.rt == null ? 3 : L.rt
       });
       cursor = pts[pts.length - 1];

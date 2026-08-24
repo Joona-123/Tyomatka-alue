@@ -632,9 +632,12 @@ function ensureRouteLayers() {
     id: 'route-stops', type: 'circle', source: 'route',
     filter: ['==', ['geometry-type'], 'Point'],
     paint: {
-      'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 3, 14, 5.5, 17, 8],
+      'circle-radius': ['*',
+        ['case', ['==', ['get', 'end'], 1], 1.55, 1],
+        ['interpolate', ['linear'], ['zoom'], 10, 2.4, 14, 4, 17, 6]],
       'circle-color': '#0F1A1E',
-      'circle-stroke-color': ['coalesce', ['get', 'color'], '#EDF3F4'], 'circle-stroke-width': 2
+      'circle-stroke-color': ['coalesce', ['get', 'color'], '#EDF3F4'],
+      'circle-stroke-width': ['case', ['==', ['get', 'end'], 1], 2.6, 1.8]
     }
   });
 }
@@ -655,7 +658,13 @@ function drawRoute(geom) {
       properties: { mode: g.mode, rt: g.rt == null ? 3 : g.rt, color: col },
       geometry: { type: 'LineString', coordinates: g.coords } });
     if (g.mode === 'transit') {
-      for (const c of g.coords) feats.push({ type: 'Feature', properties: { color: col }, geometry: { type: 'Point', coordinates: c } });
+      // Vain pysakit, ei radan mutkakohtia. Nousu ja poistuminen isompina.
+      const pts = g.stops || g.coords;
+      pts.forEach((c, i) => {
+        const end = (i === 0 || i === pts.length - 1) ? 1 : 0;
+        feats.push({ type: 'Feature', properties: { color: col, end },
+                     geometry: { type: 'Point', coordinates: c } });
+      });
     }
   }
   map.getSource('route').setData({ type: 'FeatureCollection', features: feats });
