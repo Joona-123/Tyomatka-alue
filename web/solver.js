@@ -474,3 +474,131 @@ export function bestOriginNet(transit, walkTimes, maxTravel) {
   }
   return best;
 }
+
+/* ------------------------------------------------------------------ */
+/* 6. Eteenpäin ajettava CSA: "mihin asti pääsen kotoa"                */
+/* ------------------------------------------------------------------ */
+
+const INF32 = 0x7fffffff;
+
+export function csaForward(D, o) {
+  const { DEP, ARR, FROM, TO, TRIP, footStart, footTo, footSec, nStops, nTrips } = D;
+  const minTransfer = o.minTransfer ?? 120;
+
+  const earliest = new Int32Array(nStops).fill(INF32);
+  const viaConn = new Int32Array(nStops).fill(-1);
+  const viaFoot = new Int32Array(nStops).fill(-1);
+  const isSource = new Uint8Array(nStops);
+  const sourceWalk = new Int32Array(nStops).fill(-1);
+  const onTrip = new Uint8Array(nTrips);
+
+  for (const [s, walkSec] of o.sources) {
+    const t = o.departAt + walkSec;
+    if (t < earliest[s]) { earliest[s] = t; viaConn[s] = -1; viaFoot[s] = -1; }
+    isSource[s] = 1;
+    if (sourceWalk[s] < 0 || walkSec < sourceWalk[s]) sourceWalk[s] = walkSec;
+  }
+  for (const [s] of o.sources) {
+    for (let j = footStart[s], e = footStart[s + 1]; j < e; j++) {
+      const n = footTo[j], cand = earliest[s] + footSec[j];
+      if (cand < earliest[n]) { earliest[n] = cand; viaConn[n] = -1; viaFoot[n] = s; }
+    }
+  }
+
+  const horizon = o.departAt + o.maxTravel;
+  // yhteydet on tallennettu laskevasti -> lopusta alkuun = nouseva lahtoaika
+  for (let i = DEP.length - 1; i >= 0; i--) {
+    const dep = DEP[i];
+    if (dep > horizon) break;
+    if (dep < o.departAt) continue;
+    const tr = TRIP[i], f = FROM[i];
+    let usable = onTrip[tr] === 1;
+    if (!usable) {
+      const e = earliest[f];
+      if (e !== INF32) usable = isSource[f] ? e <= dep : e + minTransfer <= dep;
+    }
+    if (!usable) continue;
+    onTrip[tr] = 1;
+
+    const t = TO[i];
+    if (ARR[i] < earliest[t]) {
+      earliest[t] = ARR[i]; viaConn[t] = i; viaFoot[t] = -1;
+      for (let j = footStart[t], e2 = footStart[t + 1]; j < e2; j++) {
+        const n = footTo[j], cand = ARR[i] + footSec[j];
+        if (cand < earliest[n]) { earliest[n] = cand; viaConn[n] = -1; viaFoot[n] = t; }
+      }
+    }
+  }
+  return { earliest, viaConn, viaFoot, isSource, sourceWalk, departAt: o.departAt };
+}
+
+/** Ajaa eteenpain-CSA:n usealle lahtoajalle ja poimii nopeimman per pysakki. */
+export function csaWindowForward(D, o) {
+  const times = [];
+  for (let t = o.departFrom; t <= o.departTo; t += o.step) times.push(t);
+  if (!times.length) times.push(o.departFrom);
+
+  const transit = new Int32Array(D.nStops).fill(-1);
+  const winner = new Int32Array(D.nStops).fill(-1);
+  const runs = [];
+  for (let k = 0; k < times.length; k++) {
+    const res = csaForward(D, {
+      departAt: times[k], sources: o.sources,
+      minTransfer: o.minTransfer, maxTravel: o.maxTravel
+    });
+    runs.push(res);
+    const E = res.earliest;
+    for (let s = 0; s < D.nStops; s++) {
+      if (E[s] === INF32) continue;
+      const tt = E[s] - times[k];
+      if (tt < 0 || tt > o.maxTravel) continue;
+      if (transit[s] < 0 || tt < transit[s]) { transit[s] = tt; winner[s] = k; }
+    }
+  }
+  return { transit, winner, runs, times, forward: true };
+}
+
+/** Purkaa matkan lahtopaikasta annetulle pysakille. */
+export function reconstructForward(D, res, ti, to, o) {
+  const { DEP, ARR, FROM, TO, TRIP } = D;
+  const { earliest, viaConn, viaFoot, isSource, sourceWalk } = res;
+  if (earliest[to] === INF32) return null;
+
+  const rev = [];
+  let s = to, guard = 0;
+  while (guard++ < 100 && !isSource[s]) {
+    if (viaFoot[s] >= 0) {
+      const p = viaFoot[s], sec = footTime(D, p, s);
+      rev.push({ mode: 'walk', fromStop: p, toStop: s, sec, dep: earliest[s] - sec, arr: earliest[s] });
+      s = p; continue;
+    }
+    const ci = viaConn[s];
+    if (ci < 0) break;
+    const trip = TRIP[ci];
+    let k = ti.start[trip];
+    while (k < ti.start[trip + 1] && ti.list[k] !== ci) k++;
+    // peruutetaan vuoroa taaksepain nousupysakille asti
+    let m = k;
+    while (m > ti.start[trip]) {
+      const f = FROM[ti.list[m]];
+      const vc = viaConn[f];
+      if (vc >= 0 && TRIP[vc] === trip) m--; else break;
+    }
+    const bc = ti.list[m];
+    const path = [FROM[bc]];
+    for (let q = m; q <= k; q++) path.push(TO[ti.list[q]]);
+    rev.push({
+      mode: 'transit', trip, route: D.tripRoute ? D.tripRoute[trip] : -1,
+      fromStop: FROM[bc], toStop: s, dep: DEP[bc], arr: ARR[ci],
+      stops: k - m + 1, path
+    });
+    s = FROM[bc];
+  }
+
+  const legs = rev.reverse();
+  const w0 = sourceWalk[s] >= 0 ? sourceWalk[s] : 0;
+  return {
+    legs, firstWalk: w0, firstStop: s,
+    departure: res.departAt, arrival: earliest[to]
+  };
+}

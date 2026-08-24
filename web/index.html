@@ -27,11 +27,13 @@
   #panel{position:absolute;left:0;right:0;bottom:0;z-index:3;background:var(--panel);
     border-top:1px solid var(--line);padding:0 14px calc(12px + env(safe-area-inset-bottom));
     max-height:66vh;overflow:auto;box-shadow:0 -12px 30px rgba(0,0,0,.45);
-    transition:max-height .22s cubic-bezier(.3,.8,.4,1);touch-action:pan-y}
+    transition:max-height .22s cubic-bezier(.3,.8,.4,1), height .22s cubic-bezier(.3,.8,.4,1);
+    touch-action:pan-y}
   #panel.drag{transition:none}
   #panel.min{max-height:44px;overflow:hidden}
   #grab{position:sticky;top:0;z-index:1;background:var(--panel);margin:0 -14px 8px;
-    padding:9px 0 8px;cursor:grab;touch-action:none;user-select:none}
+    padding:14px 0 10px;cursor:grab;touch-action:none;user-select:none;
+    -webkit-user-select:none;-webkit-tap-highlight-color:transparent}
   #grab::before{content:'';display:block;width:42px;height:4px;border-radius:2px;
     background:#3A5057;margin:0 auto}
   #grab:active{cursor:grabbing}
@@ -99,7 +101,15 @@
   <div id="grab" role="button" tabindex="0" aria-label="Näytä tai piilota asetukset"></div>
 
   <div class="grp">
-    <div class="lbl"><span>Perillä välillä</span><span class="val" id="vRuns"></span></div>
+    <div class="lbl"><span>Laskentasuunta</span></div>
+    <div id="modes">
+      <button id="dWork" type="button" aria-pressed="true">Töihin</button>
+      <button id="dHome" type="button">Kotoa pois</button>
+    </div>
+  </div>
+
+  <div class="grp">
+    <div class="lbl"><span id="lTime">Perillä välillä</span><span class="val" id="vRuns"></span></div>
     <div class="tw">
       <input type="time" id="arrFrom" value="07:30" step="300">
       <span>–</span>
@@ -181,6 +191,23 @@ const under = () => (map.getLayer('route-case') ? 'route-case' : undefined);
 let marker = null, work = null, meta = null, ready = false, pending = false;
 
 let mode = 'work', home = null, homeMarker = null;
+let dir = 'toWork';
+
+function setDir(d) {
+  dir = d;
+  $('#dWork').setAttribute('aria-pressed', String(d === 'toWork'));
+  $('#dHome').setAttribute('aria-pressed', String(d === 'fromHome'));
+  $('#lTime').textContent = d === 'toWork' ? 'Perillä välillä' : 'Lähtö välillä';
+  $('#mWork').textContent = d === 'toWork' ? 'Työpaikan' : 'Kodin';
+  $('#mHome').textContent = d === 'toWork' ? 'Kodin' : 'Määränpään';
+  $('#hint').innerHTML = d === 'toWork'
+    ? 'Napauta karttaa: <b>työpaikka</b>'
+    : 'Napauta karttaa: <b>koti</b>';
+  solve();
+  if (home) worker.postMessage({ type: 'itinerary', lat: home.lat, lon: home.lon });
+}
+$('#dWork').onclick = () => setDir('toWork');
+$('#dHome').onclick = () => setDir('fromHome');
 
 map.on('click', e => {
   if (mode === 'work') setWork(e.lngLat.lat, e.lngLat.lng);
@@ -191,8 +218,9 @@ function setMode(m) {
   mode = m;
   $('#mWork').setAttribute('aria-pressed', String(m === 'work'));
   $('#mHome').setAttribute('aria-pressed', String(m === 'home'));
+  const a = dir === 'toWork' ? 'työpaikka' : 'koti';
   $('#hint').innerHTML = m === 'work'
-    ? 'Napauta karttaa: <b>työpaikka</b>'
+    ? `Napauta karttaa: <b>${a}</b>`
     : 'Napauta aluetta: <b>paras matkavaihtoehto</b>';
 }
 $('#mWork').onclick = () => setMode('work');
@@ -234,8 +262,6 @@ function setWork(lat, lon) {
   } else marker.setLngLat([lon, lat]);
   $('#modeRow').style.display = '';
   setMode('home');
-  clearRoute();
-  $('#trip').innerHTML = '';
   solve();
 }
 
@@ -265,6 +291,8 @@ worker.onmessage = ev => {
     }
     draw(m);
     releaseWorker();
+    // työpaikan siirto mitätöi vanhan reitin -> lasketaan se heti uudelleen
+    if (home) worker.postMessage({ type: 'itinerary', lat: home.lat, lon: home.lon });
   } else if (m.type === 'itinerary') {
     drawTrip(m);
   } else if (m.type === 'error') {
@@ -337,7 +365,7 @@ function ensureLineLayers() {
 
 function updateLines(preview) {
   if (!ways || !lastRes || map.getZoom() < VZ) return;
-  const cap = preview ? 4000 : MAXFEAT;
+  const cap = MAXFEAT;
   ensureLineLayers();
 
   const r = lastRes;
@@ -448,7 +476,7 @@ function draw(r) {
       ? `<span class="warn">ei pysäkkejä työpaikan lähellä</span> · <b>${r.km2}</b> km² kävellen<br>`
       : `<b>${r.reachableStops.toLocaleString('fi')}</b> pysäkkiä · <b>${r.km2}</b> km² tavoitettavissa<br>`) +
     `<b>${r.runs}</b> saapumisaika${r.runs === 1 ? '' : 'a'} · laskenta <b>${r.ms} ms</b><br>` +
-    (r.preview ? `<span class="warn">esikatselu</span> · ` : '') + `kävely katuverkkoa pitkin`;
+    `kävely katuverkkoa pitkin`;
   updateLines(r.preview);
 }
 
@@ -560,14 +588,11 @@ function solve(opts) {
   let a0 = secs($('#arrFrom').value), a1 = secs($('#arrTo').value);
   if (a1 < a0) [a0, a1] = [a1, a0];
 
-  // Raahatessa ajetaan vain yksi saapumisaika ikkunan keskeltä. Se on
-  // ~13x kevyempi ja riittää siihen että alue elää sormen mukana.
-  if (preview) { const mid = Math.round((a0 + a1) / 600) * 300; a0 = a1 = mid; }
-
   const msg = {
     type: 'solve', preview,
     lat: work.lat, lon: work.lon,
     arriveFrom: a0, arriveTo: a1, step: 300,
+    direction: dir,
     maxTravel: +$('#maxT').value * 60,
     walkMps: +$('#spd').value / 3.6,
     maxWalkSec: +$('#walk').value * 60,
@@ -618,40 +643,56 @@ function sync() {
 (() => {
   const panel = $('#panel'), grab = $('#grab');
   const MIN = 44;
-  let y0 = 0, base = 0, dragging = false, moved = 0;
-  // Paneeli kutistuu KORKEUDESTA, ei siirry alaspäin -> kahva ei voi valua
-  // selaimen osoitepalkin alle.
-  const full = () => Math.min(panel.scrollHeight, innerHeight * 0.66);
-  const setH = v => { panel.style.maxHeight = Math.round(Math.min(full(), Math.max(MIN, v))) + 'px'; };
-  const cur = () => panel.getBoundingClientRect().height;
-  const open = () => { panel.classList.remove('min'); panel.style.maxHeight = ''; };
-  const shut = () => { panel.classList.add('min'); panel.style.maxHeight = ''; };
-  const toggle = () => panel.classList.contains('min') ? open() : shut();
+  let y0 = 0, base = 0, maxH = 0, dragging = false, moved = 0, want = 0, raf = 0;
+
+  // Korkeus asetetaan pikseleina ja tahdistetaan requestAnimationFramella.
+  // scrollHeight luetaan vain kertaalleen vedon alussa: sen lukeminen kesken
+  // vedon pakottaa uudelleenladonnan, mika oli sen nykimisen syy.
+  const apply = () => {
+    raf = 0;
+    panel.style.height = Math.round(Math.min(maxH, Math.max(MIN, want))) + 'px';
+  };
+  const queue = v => { want = v; if (!raf) raf = requestAnimationFrame(apply); };
+
+  const settle = expanded => {
+    panel.style.transition = '';
+    panel.classList.toggle('min', !expanded);
+    panel.style.height = '';
+    panel.style.overflow = '';
+  };
 
   grab.addEventListener('pointerdown', e => {
     if (innerWidth >= 760) return;
-    dragging = true; moved = 0; y0 = e.clientY; base = cur();
-    panel.classList.add('drag'); panel.classList.remove('min');
+    e.preventDefault();
+    const r = panel.getBoundingClientRect();
+    maxH = Math.min(panel.scrollHeight, innerHeight * 0.66);
+    base = r.height;
+    y0 = e.clientY; moved = 0; dragging = true;
+    panel.style.transition = 'none';
+    panel.style.overflow = 'hidden';
+    panel.style.height = Math.round(base) + 'px';
     grab.setPointerCapture(e.pointerId);
-  });
+  }, { passive: false });
+
   grab.addEventListener('pointermove', e => {
     if (!dragging) return;
     const d = e.clientY - y0;
-    moved = Math.max(moved, Math.abs(d));
-    setH(base - d);
+    if (Math.abs(d) > moved) moved = Math.abs(d);
+    queue(base - d);
   });
+
   const end = () => {
     if (!dragging) return;
     dragging = false;
-    panel.classList.remove('drag');
-    panel.style.maxHeight = '';
-    if (moved < 6) { toggle(); return; }
-    if (cur() < full() * 0.5) shut(); else open();
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+    if (moved < 8) { settle(panel.classList.contains('min')); return; }
+    settle(Math.min(maxH, Math.max(MIN, want)) > (MIN + maxH) / 2);
   };
   grab.addEventListener('pointerup', end);
   grab.addEventListener('pointercancel', end);
+  grab.addEventListener('lostpointercapture', end);
   grab.addEventListener('keydown', e => {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); settle(panel.classList.contains('min')); }
   });
 })();
 

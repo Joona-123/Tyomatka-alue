@@ -85,17 +85,24 @@ function walkGeom(fromLL, toLL, maxSec, walkMps) {
   const a = SV.cellIndex(walk, fromLL[0], fromLL[1], 4);
   const b = SV.cellIndex(walk, toLL[0], toLL[1], 4);
   if (a < 0 || b < 0) return [fromLL, toLL];
-  const net = SV.walkNetwork(walk, a, Math.max(60, Math.round(maxSec * 1.6)), walkMps, true);
-  const p = net && SV.walkPath(walk, net, b);
-  if (!p || p.length < 2) return [fromLL, toLL];
-  return [fromLL, ...p, toLL];
+  // Aikaraja on suoraan verkkoetaisyys; jos polku ei mahdu, yritetaan
+  // kertaalleen selvasti isommalla katolla ennen kuin luovutetaan suoraan
+  // viivaan. Aiemmin liian tiukka katto teki kavelyista janteita.
+  const base = Math.max(120, Math.round((maxSec || 300) * 1.5) + 120);
+  for (const cap of [base, base * 3]) {
+    const net = SV.walkNetwork(walk, a, cap, walkMps, true);
+    const p = net && SV.walkPath(walk, net, b);
+    if (p && p.length >= 2) return [fromLL, ...p, toLL];
+  }
+  return [fromLL, toLL];
 }
 
 /** Koko matkan geometria: kavelyt verkkoa pitkin, ajo-osuudet pysakkiketjuna. */
-function routeGeometry(legs, homeLL, workLL, walkMps) {
+function routeGeometry(legs, homeLL, workLL, walkMps, firstWalkSec) {
   const segs = [];
   const ll = s => [D.lon[s], D.lat[s]];
   let cursor = homeLL;
+  let lead = firstWalkSec || 900;
 
   for (const L of legs) {
     if (L.mode === 'walk') {
@@ -107,7 +114,8 @@ function routeGeometry(legs, homeLL, workLL, walkMps) {
       // kavely kursorista nousupysakille, jos valissa on matkaa
       const board = pts[0];
       if (cursor && (Math.abs(cursor[0] - board[0]) > 1e-6 || Math.abs(cursor[1] - board[1]) > 1e-6)) {
-        segs.push({ mode: 'walk', coords: walkGeom(cursor, board, 900, walkMps) });
+        segs.push({ mode: 'walk', coords: walkGeom(cursor, board, lead, walkMps) });
+        lead = 900;
       }
       segs.push({ mode: 'transit', coords: pts, line: L.line, kind: L.kind });
       cursor = pts[pts.length - 1];
@@ -133,11 +141,15 @@ self.onmessage = async (e) => {
       const sources = walk
         ? SV.stopWalkTimes(D, walk, stopCell, m.lat, m.lon, m.maxWalkSec, m.walkMps)
         : SV.nearbyStops(D, m.lat, m.lon, m.maxWalkSec, effMps);
-      const win = SV.csaWindow(D, {
-        arriveFrom: m.arriveFrom, arriveTo: m.arriveTo, step: m.step,
-        sources, minTransfer: m.minTransfer, maxTravel: m.maxTravel
-      });
-      last = { win, maxTravel: m.maxTravel, walkMps: m.walkMps, maxWalkSec: m.maxWalkSec,
+      const forward = m.direction === 'fromHome';
+      const win = forward
+        ? SV.csaWindowForward(D, {
+            departFrom: m.arriveFrom, departTo: m.arriveTo, step: m.step,
+            sources, minTransfer: m.minTransfer, maxTravel: m.maxTravel })
+        : SV.csaWindow(D, {
+            arriveFrom: m.arriveFrom, arriveTo: m.arriveTo, step: m.step,
+            sources, minTransfer: m.minTransfer, maxTravel: m.maxTravel });
+      last = { win, forward, maxTravel: m.maxTravel, walkMps: m.walkMps, maxWalkSec: m.maxWalkSec,
                grid: null, lat: m.lat, lon: m.lon };
 
       if (!walk) {
@@ -193,6 +205,28 @@ self.onmessage = async (e) => {
         : SV.nearbyStops(D, m.lat, m.lon, last.maxWalkSec, effMps);
       const b = SV.bestOriginNet(W.transit, wt, last.maxTravel);
 
+      if (last.forward && b) {
+        // Kotoa ulos: b.stop on MAALIpysakki, kavely siita napautettuun pisteeseen
+        const k = W.winner[b.stop];
+        const r = SV.reconstructForward(D, W.runs[k], ti, b.stop, {});
+        if (r) {
+          const legs = r.legs.concat([{
+            mode: 'walk', last: true, fromStop: b.stop, toStop: -1,
+            dep: r.arrival, arr: r.arrival + b.walkSec, sec: b.walkSec
+          }]);
+          const named = nameLegs(legs);
+          self.postMessage({
+            type: 'itinerary', legs: named,
+            firstWalk: r.firstWalk, firstStop: D.name[r.firstStop],
+            leave: r.departure, arriveBy: r.arrival + b.walkSec,
+            total: r.arrival + b.walkSec - r.departure,
+            geometry: routeGeometry(named, [last.lon, last.lat], [m.lon, m.lat],
+                                    last.walkMps, r.firstWalk)
+          });
+          return;
+        }
+      }
+
       if (walkTotal >= 0 && (!b || walkTotal <= b.total)) {
         const arr = W.times[W.times.length - 1];
         self.postMessage({
@@ -219,7 +253,7 @@ self.onmessage = async (e) => {
         legs: named,
         firstWalk: b.walkSec, firstStop: D.name[b.stop],
         leave, arriveBy: r.arrival, total: r.arrival - leave,
-        geometry: routeGeometry(named, [m.lon, m.lat], [last.lon, last.lat], last.walkMps)
+        geometry: routeGeometry(named, [m.lon, m.lat], [last.lon, last.lat], last.walkMps, b.walkSec)
       });
       return;
     }
