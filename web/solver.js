@@ -129,9 +129,11 @@ export function reconstruct(D, res, ti, from, o) {
     while (k < ti.start[trip + 1] && ti.list[k] !== ci) k++;
 
     let alight = TO[ci], alightTime = ARR[ci], stops = 1;
+    const path = [FROM[ci]];
     for (let m = k; m < ti.start[trip + 1]; m++) {
       const c = ti.list[m];
       alight = TO[c]; alightTime = ARR[c]; stops = m - k + 1;
+      path.push(alight);
       if (isTarget[alight]) break;
       if (latest[alight] >= alightTime) {
         const nx = viaConn[alight];
@@ -143,7 +145,7 @@ export function reconstruct(D, res, ti, from, o) {
       mode: 'transit', trip,
       route: D.tripRoute ? D.tripRoute[trip] : -1,
       fromStop: FROM[ci], toStop: alight,
-      dep: DEP[ci], arr: alightTime, stops
+      dep: DEP[ci], arr: alightTime, stops, path
     });
     s = alight; t = alightTime;
   }
@@ -338,4 +340,137 @@ export function csaWindow(D, o) {
     }
   }
   return { transit, winner, runs, times };
+}
+
+/* ------------------------------------------------------------------ */
+/* 5. Kävely katuverkkoa pitkin yksittäisestä pisteestä                */
+/* ------------------------------------------------------------------ */
+
+/** Ruudun indeksi koordinaateista, tarvittaessa lähimpään kuljettavaan napsautettuna. */
+export function cellIndex(walk, lon, lat, snap = 3) {
+  const { grid: ok, w: gw, h: gh, mercX0, mercY0, mercCell } = walk;
+  let i = Math.round((lonToMerc(lon) - mercX0) / mercCell);
+  let j = Math.round((latToMerc(lat) - mercY0) / mercCell);
+  if (i < 0 || i >= gw || j < 0 || j >= gh) return -1;
+  if (ok[j * gw + i]) return j * gw + i;
+  for (let r = 1; r <= snap; r++) {
+    for (let dj = -r; dj <= r; dj++) {
+      const jj = j + dj; if (jj < 0 || jj >= gh) continue;
+      for (let di = -r; di <= r; di++) {
+        const ii = i + di; if (ii < 0 || ii >= gw) continue;
+        if (ok[jj * gw + ii]) return jj * gw + ii;
+      }
+    }
+  }
+  return -1;
+}
+
+/**
+ * Rajattu Dial-haku yhdestä ruudusta. Palauttaa Mapin ruutu -> sekuntia.
+ * Harva esitys, koska säde on pieni (satoja ruutuja).
+ */
+export function walkNetwork(walk, startCell, maxSec, walkMps, withPrev = false) {
+  const { grid: ok, w: gw, h: gh, cellM } = walk;
+  if (startCell < 0) return null;
+  const cOrt = Math.max(1, Math.round(cellM / walkMps));
+  const cDia = Math.max(1, Math.round(cellM * Math.SQRT2 / walkMps));
+  const dist = new Map();
+  const prev = withPrev ? new Map() : null;
+  const buckets = new Array(maxSec + 1);
+  const push = (c, d, from) => {
+    if (d > maxSec) return;
+    const old = dist.get(c);
+    if (old !== undefined && old <= d) return;
+    dist.set(c, d);
+    if (prev && from !== undefined) prev.set(c, from);
+    (buckets[d] || (buckets[d] = [])).push(c);
+  };
+  push(startCell, 0);
+  for (let d = 0; d <= maxSec; d++) {
+    const b = buckets[d];
+    if (!b) continue;
+    for (let bi = 0; bi < b.length; bi++) {
+      const c = b[bi];
+      if (dist.get(c) !== d) continue;
+      const j = (c / gw) | 0, i = c - j * gw;
+      for (let dj = -1; dj <= 1; dj++) {
+        const jj = j + dj; if (jj < 0 || jj >= gh) continue;
+        for (let di = -1; di <= 1; di++) {
+          if (!di && !dj) continue;
+          const ii = i + di; if (ii < 0 || ii >= gw) continue;
+          const nc = jj * gw + ii;
+          if (!ok[nc]) continue;
+          push(nc, d + ((di && dj) ? cDia : cOrt), c);
+        }
+      }
+    }
+    buckets[d] = null;
+  }
+  return { dist, prev, start: startCell };
+}
+
+/** Ruudun keskipiste asteina. */
+export function cellLngLat(walk, c) {
+  const j = (c / walk.w) | 0, i = c - j * walk.w;
+  return [mercToLon(walk.mercX0 + (i + 0.5) * walk.mercCell),
+          mercToLat(walk.mercY0 + (j + 0.5) * walk.mercCell)];
+}
+
+/** Kevyt pehmennys: keskiarvoistaa pisteita, sailyttaa paatepisteet. */
+export function smooth(pts, passes = 2) {
+  let a = pts;
+  for (let p = 0; p < passes && a.length > 2; p++) {
+    const b = [a[0]];
+    for (let i = 1; i < a.length - 1; i++) {
+      b.push([(a[i - 1][0] + 2 * a[i][0] + a[i + 1][0]) / 4,
+              (a[i - 1][1] + 2 * a[i][1] + a[i + 1][1]) / 4]);
+    }
+    b.push(a[a.length - 1]);
+    a = b;
+  }
+  return a;
+}
+
+/** Kavelyreitti verkkohaun alusta annettuun ruutuun. */
+export function walkPath(walk, net, targetCell) {
+  if (!net || !net.prev || !net.dist.has(targetCell)) return null;
+  const cells = [targetCell];
+  let c = targetCell, guard = 0;
+  while (c !== net.start && guard++ < 100000) {
+    const p = net.prev.get(c);
+    if (p === undefined) break;
+    cells.push(p); c = p;
+  }
+  cells.reverse();
+  return smooth(cells.map(x => cellLngLat(walk, x)));
+}
+
+/**
+ * Pysäkit joihin annetusta pisteestä pääsee kävellen, todellisen katuverkon
+ * mukaisin ajoin. Korvaa nearbyStops()-linnuntiearvion.
+ */
+export function stopWalkTimes(D, walk, stopCell, lat, lon, maxSec, walkMps) {
+  const start = cellIndex(walk, lon, lat, 4);
+  const net = walkNetwork(walk, start, maxSec, walkMps);
+  if (!net) return [];
+  const out = [];
+  for (let s = 0; s < D.nStops; s++) {
+    const c = stopCell[s];
+    if (c < 0) continue;
+    const d = net.dist.get(c);
+    if (d !== undefined) out.push([s, d]);
+  }
+  return out;
+}
+
+/** Paras lähtöpysäkki, kun kävelyajat on jo laskettu verkosta. */
+export function bestOriginNet(transit, walkTimes, maxTravel) {
+  let best = null;
+  for (const [s, walkSec] of walkTimes) {
+    if (transit[s] < 0) continue;
+    const total = transit[s] + walkSec;
+    if (total > maxTravel) continue;
+    if (!best || total < best.total) best = { stop: s, walkSec, total };
+  }
+  return best;
 }

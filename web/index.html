@@ -230,6 +230,8 @@ function setWork(lat, lon) {
   } else marker.setLngLat([lon, lat]);
   $('#modeRow').style.display = '';
   setMode('home');
+  clearRoute();
+  $('#trip').innerHTML = '';
   solve();
 }
 
@@ -446,9 +448,70 @@ function draw(r) {
 
 const hhmm = t => `${String(Math.floor(t / 3600) % 24).padStart(2, '0')}.${String(Math.floor(t / 60) % 60).padStart(2, '0')}`;
 
+function ensureRouteLayers() {
+  if (map.getSource('route')) return;
+  map.addSource('route', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({
+    id: 'route-case', type: 'line', source: 'route',
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: {
+      'line-color': '#081114', 'line-opacity': 0.9,
+      'line-width': ['interpolate', ['linear'], ['zoom'], 9, 6, 14, 11, 17, 18]
+    }
+  });
+  map.addLayer({
+    id: 'route-walk', type: 'line', source: 'route',
+    filter: ['==', ['get', 'mode'], 'walk'],
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: {
+      'line-color': '#EDF3F4', 'line-dasharray': [0.4, 1.7],
+      'line-width': ['interpolate', ['linear'], ['zoom'], 9, 3, 14, 5.5, 17, 9]
+    }
+  });
+  map.addLayer({
+    id: 'route-transit', type: 'line', source: 'route',
+    filter: ['==', ['get', 'mode'], 'transit'],
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: {
+      'line-color': '#E8A33D',
+      'line-width': ['interpolate', ['linear'], ['zoom'], 9, 3.5, 14, 6.5, 17, 11]
+    }
+  });
+  map.addLayer({
+    id: 'route-stops', type: 'circle', source: 'route',
+    filter: ['==', ['geometry-type'], 'Point'],
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 3, 14, 5.5, 17, 8],
+      'circle-color': '#0F1A1E', 'circle-stroke-color': '#E8A33D', 'circle-stroke-width': 2.2
+    }
+  });
+}
+
+function clearRoute() {
+  if (map.getSource('route')) map.getSource('route').setData({ type: 'FeatureCollection', features: [] });
+}
+
+function drawRoute(geom) {
+  if (!geom || !geom.length) { clearRoute(); return; }
+  ensureRouteLayers();
+  const feats = [];
+  for (const g of geom) {
+    if (!g.coords || g.coords.length < 2) continue;
+    feats.push({ type: 'Feature', properties: { mode: g.mode }, geometry: { type: 'LineString', coordinates: g.coords } });
+    if (g.mode === 'transit') {
+      for (const c of g.coords) feats.push({ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: c } });
+    }
+  }
+  map.getSource('route').setData({ type: 'FeatureCollection', features: feats });
+}
+
 function drawTrip(m) {
   const el = $('#trip');
-  if (m.empty) { el.innerHTML = `<div class="thead"><span class="s warn">${m.empty}</span></div>`; return; }
+  if (m.empty) {
+    el.innerHTML = `<div class="thead"><span class="s warn">${m.empty}</span></div>`;
+    clearRoute(); return;
+  }
+  drawRoute(m.geometry);
 
   let h = `<div class="thead"><span class="t">${Math.round(m.total / 60)} min</span>` +
           `<span class="s">${m.walkOnly ? 'pelkkä kävely' : 'lähtö ' + hhmm(m.leave) + ' · perillä ' + hhmm(m.arriveBy)}</span></div>`;
