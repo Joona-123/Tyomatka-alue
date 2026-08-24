@@ -63,11 +63,14 @@ const RAIL_BIT = { rail: 1, light_rail: 1, narrow_gauge: 1, tram: 2, subway: 4, 
 const YARD = new Set(['yard', 'siding', 'spur', 'crossover']);
 
 function classify(P) {
-  if (!P) return 0;
-  if (P.railway && RAIL_BIT[P.railway] && !YARD.has(P.service)) return -RAIL_BIT[P.railway];
-  if (P.foot === 'no' || P.access === 'private' || P.access === 'no') return 0;
-  if (P.highway && OK.has(P.highway)) return 1;
-  return 0;
+  if (!P) return null;
+  const rb = P.railway ? (RAIL_BIT[P.railway] || 0) : 0;
+  const rail = (rb && !YARD.has(P.service)) ? rb : 0;
+  let walk = false;
+  if (!(P.foot === 'no' || P.access === 'private' || P.access === 'no')) {
+    if (P.highway && OK.has(P.highway)) walk = true;
+  }
+  return (walk || rail) ? { walk, rail } : null;
 }
 
 function parts(geom) {
@@ -84,7 +87,7 @@ async function scan(fn) {
     if (!ln.startsWith('{')) continue;
     let f; try { f = JSON.parse(ln); } catch { continue; }
     const cls = classify(f.properties);
-    if (cls === 0) continue;
+    if (!cls) continue;
     fn(cls, parts(f.geometry));
   }
 }
@@ -200,17 +203,23 @@ await scan((cls, ps) => {
   for (const co of ps) {
     const mp = co.map(c => [toX(c[0]), toY(c[1])]);
     const flags = mp.map(p => junction.has(Math.round(p[0]) * KEYMUL + Math.round(p[1])) ? 1 : 0);
-    if (cls > 0) {
+    if (cls.walk) {
       for (let k = 0; k + 1 < mp.length; k++) line(mp[k][0], mp[k][1], mp[k + 1][0], mp[k + 1][1], 2);
       pushWay(walkV, mp, flags, 1);
       nWalk++;
-    } else {
-      pushWay(railV, mp, flags, -cls);
+    }
+    if (cls.rail) {                      // sama vayla voi kuulua molempiin
+      pushWay(railV, mp, flags, cls.rail);
       nRail++;
     }
   }
 });
 console.log(`Kavelyvaylia ${nWalk}, rataosuuksia ${nRail}`);
+if (nRail < 50) {
+  console.error(`\nVAROITUS: rataosuuksia vain ${nRail}. OSM-syotteessa ei ole`);
+  console.error(`rautatieaineistoa. Tarkista etta osmium tags-filter sisaltaa w/railway`);
+  console.error(`ja etta lahde-pbf kattaa radat.\n`);
+}
 
 /* ---------- levitys (vain rasteriin) ---------- */
 
