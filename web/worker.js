@@ -1,6 +1,7 @@
 import * as SV from './solver.js';
 
-let D = null, meta = null, walk = null, ti = null, stopCell = null, railWalk = null;
+let D = null, meta = null, walk = null, ti = null, stopCell = null;
+let walkWays = null, railWays = null;
 let last = null;   // viimeisin ratkaisu matkaehdotusta varten
 
 async function bin(base, name, Type, tries = 4) {
@@ -51,19 +52,27 @@ async function load(base) {
     for (let s = 0; s < D.nStops; s++) {
       stopCell[s] = SV.cellIndex(walk, D.lon[s], D.lat[s], 3);
     }
-    try {
-      const rg = await bin(base, 'rail_grid.bin', Uint8Array, 2);
-      let cells = 0;
-      for (let i = 0; i < rg.length; i++) if (rg[i]) cells++;
-      railWalk = cells > 0 ? { ...wm, grid: rg } : null;
-      meta.railCellCount = cells;
-    } catch (e) { railWalk = null; meta.railError = String(e.message || e); }
   } catch (e) {
     walk = null; stopCell = null;
     meta.walkError = String(e.message || e);
   }
+
+  // Tarkka viivageometria: reititys tehdaan tallo, ei rasterilla.
+  const ways = async pre => {
+    const [st, ax, ay, dx, dy, kd] = await Promise.all([
+      bin(base, `${pre}_start.bin`, Uint32Array), bin(base, `${pre}_ax.bin`, Int32Array),
+      bin(base, `${pre}_ay.bin`, Int32Array), bin(base, `${pre}_dx.bin`, Int16Array),
+      bin(base, `${pre}_dy.bin`, Int16Array), bin(base, `${pre}_kind.bin`, Uint8Array)
+    ]);
+    return ax.length ? SV.makeWays(st, ax, ay, dx, dy, kd) : null;
+  };
+  try { walkWays = await ways('way'); }
+  catch (e) { walkWays = null; meta.wayError = String(e.message || e); }
+  try { railWays = await ways('rway'); }
+  catch (e) { railWays = null; meta.railError = String(e.message || e); }
   return { ...meta, hasWalk: !!walk, walkCells: walk ? walk.w * walk.h : 0,
-           hasRail: !!railWalk };
+           hasRail: !!railWays, hasWays: !!walkWays,
+           nWays: walkWays ? walkWays.n : 0, nRailWays: railWays ? railWays.n : 0 };
 }
 
 // GTFS route_type. Perusarvot 0-12, laajennetut 100-1700.
@@ -90,21 +99,14 @@ function nameLegs(legs) {
 }
 
 /** Kavelyreitti kahden pisteen valilla katuverkkoa pitkin. */
-function walkGeom(fromLL, toLL, maxSec, walkMps) {
-  if (!walk) return [fromLL, toLL];
-  const a = SV.cellIndex(walk, fromLL[0], fromLL[1], 4);
-  const b = SV.cellIndex(walk, toLL[0], toLL[1], 4);
-  if (a < 0 || b < 0) return [fromLL, toLL];
-  // Aikaraja on suoraan verkkoetaisyys; jos polku ei mahdu, yritetaan
-  // kertaalleen selvasti isommalla katolla ennen kuin luovutetaan suoraan
-  // viivaan. Aiemmin liian tiukka katto teki kavelyista janteita.
-  const base = Math.max(120, Math.round((maxSec || 300) * 1.5) + 120);
-  for (const cap of [base, base * 3]) {
-    const net = SV.walkNetwork(walk, a, cap, walkMps, true);
-    const p = net && SV.walkPath(walk, net, b);
-    if (p && p.length >= 2) return [fromLL, ...p, toLL];
-  }
-  return [fromLL, toLL];
+const merc = ll => [SV.lonToMerc(ll[0]), SV.latToMerc(ll[1])];
+
+/** Kavelyreitti oikeaa katuverkkoa pitkin. */
+function walkGeom(fromLL, toLL) {
+  if (!walkWays) return [fromLL, toLL];
+  const r = SV.routeOnWays(walkWays, merc(fromLL), merc(toLL), 0);
+  if (!r || r.coords.length < 2) return [fromLL, toLL];
+  return [fromLL, ...r.coords, toLL];
 }
 
 // route_type -> rataverkon bittimaski (1 juna, 2 ratikka, 4 metro)
@@ -116,27 +118,16 @@ function railMask(rt) {
 }
 
 /** Ajo-osuus rataverkkoa pitkin, pysakkivali kerrallaan. */
+/** Ajo-osuus rataverkkoa pitkin, pysakkivali kerrallaan. */
 function railGeom(stops, mask) {
-  if (!railWalk || !mask) return null;
+  if (!railWays || !mask) return null;
   const ll = s => [D.lon[s], D.lat[s]];
   const out = [];
   let hits = 0;
   for (let k = 0; k + 1 < stops.length; k++) {
-    const a = stops[k], b = stops[k + 1];
-    let seg = null;
-    const ca = SV.cellIndex(railWalk, D.lon[a], D.lat[a], 8, railWalk.grid, mask);
-    const cb = SV.cellIndex(railWalk, D.lon[b], D.lat[b], 8, railWalk.grid, mask);
-    if (ca >= 0 && cb >= 0) {
-      // kustannus 1 / ruutu -> katto on ruutumaara, ei sekunteja
-      const dx = Math.abs((ca % railWalk.w) - (cb % railWalk.w));
-      const dy = Math.abs(((ca / railWalk.w) | 0) - ((cb / railWalk.w) | 0));
-      const cap = Math.max(60, Math.round((dx + dy) * 4));
-      const net = SV.walkNetwork(railWalk, ca, cap, railWalk.cellM, true, mask);
-      const p = net && SV.walkPath(railWalk, net, cb);
-      if (p && p.length >= 2) { seg = p; hits++; }
-    }
-    // yksittainen epaonnistuminen ei enaa pudota koko osuutta suoraksi
-    if (!seg) seg = [ll(a), ll(b)];
+    const a = ll(stops[k]), b = ll(stops[k + 1]);
+    const r = SV.routeOnWays(railWays, merc(a), merc(b), mask);
+    let seg = (r && r.coords.length >= 2) ? (hits++, r.coords) : [a, b];
     if (out.length) seg = seg.slice(1);
     out.push(...seg);
   }
@@ -161,8 +152,7 @@ function routeGeometry(legs, homeLL, workLL, walkMps, firstWalkSec) {
       // kavely kursorista nousupysakille, jos valissa on matkaa
       const board = pts[0];
       if (cursor && (Math.abs(cursor[0] - board[0]) > 1e-6 || Math.abs(cursor[1] - board[1]) > 1e-6)) {
-        segs.push({ mode: 'walk', coords: walkGeom(cursor, board, lead, walkMps) });
-        lead = 900;
+        segs.push({ mode: 'walk', coords: walkGeom(cursor, board) });
       }
       const rails = railGeom(chain, railMask(L.rt));
       segs.push({
@@ -196,10 +186,12 @@ self.onmessage = async (e) => {
       const win = forward
         ? SV.csaWindowForward(D, {
             departFrom: m.arriveFrom, departTo: m.arriveTo, step: m.step,
-            sources, minTransfer: m.minTransfer, maxTravel: m.maxTravel })
+            sources, minTransfer: m.minTransfer, maxTravel: m.maxTravel,
+            maxTransfers: m.maxTransfers })
         : SV.csaWindow(D, {
             arriveFrom: m.arriveFrom, arriveTo: m.arriveTo, step: m.step,
-            sources, minTransfer: m.minTransfer, maxTravel: m.maxTravel });
+            sources, minTransfer: m.minTransfer, maxTravel: m.maxTravel,
+            maxTransfers: m.maxTransfers });
       last = { win, forward, maxTravel: m.maxTravel, walkMps: m.walkMps, maxWalkSec: m.maxWalkSec,
                grid: null, lat: m.lat, lon: m.lon };
 
@@ -288,7 +280,7 @@ self.onmessage = async (e) => {
           firstWalk: 0, firstStop: null,
           leave: arr - walkTotal, arriveBy: arr, total: walkTotal,
           geometry: [{ mode: 'walk',
-            coords: walkGeom([m.lon, m.lat], [last.lon, last.lat], walkTotal, last.walkMps) }]
+            coords: walkGeom([m.lon, m.lat], [last.lon, last.lat]) }]
         });
         return;
       }

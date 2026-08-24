@@ -62,10 +62,10 @@
   .legcap{display:flex;justify-content:space-between;font-family:var(--mono);
     font-size:10px;color:var(--muted)}
 
-  #modes{display:flex;gap:6px}
-  #modes button{flex:1;padding:8px;border-radius:6px;border:1px solid var(--line);
+  #modes, .seg{display:flex;gap:6px}
+  #modes button, .seg button{flex:1;padding:8px;border-radius:6px;border:1px solid var(--line);
     background:#16262B;color:var(--muted);font-size:13px;cursor:pointer}
-  #modes button[aria-pressed=true]{background:var(--accent);color:#0B1417;border-color:var(--accent);font-weight:600}
+  #modes button[aria-pressed=true], .seg button[aria-pressed=true]{background:var(--accent);color:#0B1417;border-color:var(--accent);font-weight:600}
 
   #trip{margin:0 0 12px}
   #trip:empty{display:none}
@@ -125,6 +125,17 @@
   </div>
 
   <div class="grp">
+    <div class="lbl"><span>Vaihtoja enintään</span></div>
+    <div id="xfer" class="seg">
+      <button type="button" data-v="0">0</button>
+      <button type="button" data-v="1">1</button>
+      <button type="button" data-v="2">2</button>
+      <button type="button" data-v="3">3</button>
+      <button type="button" data-v="-1" aria-pressed="true">∞</button>
+    </div>
+  </div>
+
+  <div class="grp">
     <div class="lbl"><span>Kävelynopeus</span><span class="val" id="vSpd">4,5 km/h</span></div>
     <input type="range" id="spd" min="3" max="6" step="0.1" value="4.5">
   </div>
@@ -168,6 +179,34 @@ const MODE_COLORS = [
 ];
 const BUS_COLOR = '#0074BE';
 const transitColorExpr = () => ['match', ['get', 'rt'], ...MODE_COLORS, BUS_COLOR];
+
+// Kulkuvalineen perussavy, jota linjan nimi kiertaa hieman. Nain kaksi eri
+// bussia erottuvat toisistaan mutta molemmat nakyvat yha bussin sinisena.
+const MODE_HUE = {
+  0: 152, 5: 152, 900: 152,        // ratikka
+  1: 22, 400: 22, 401: 22,         // metro
+  2: 288, 100: 288, 109: 288,      // juna
+  4: 192, 1000: 192,               // lautta
+  3: 205, 11: 205, 700: 205, 701: 205, 704: 205, 715: 205
+};
+function hueFor(rt) {
+  if (MODE_HUE[rt] != null) return MODE_HUE[rt];
+  if (rt >= 900 && rt < 1000) return 152;
+  if (rt >= 100 && rt < 200) return 288;
+  if (rt >= 400 && rt < 500) return 22;
+  return 205;
+}
+function routeColor(rt, name) {
+  const h0 = hueFor(rt);
+  let h = 2166136261;
+  const str = String(name == null ? '' : name);
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+  const a = Math.abs(h);
+  const hue = ((h0 + ((a % 9) - 4) * 7) % 360 + 360) % 360;
+  const sat = 60 + ((a >>> 4) % 3) * 13;
+  const lig = 45 + ((a >>> 8) % 3) * 8;
+  return `hsl(${hue}, ${sat}%, ${lig}%)`;
+}
 
 /* --- värit: portaittaiset 5 min kaistat, reunimmainen lämmin = "juuri ja juuri" --- */
 const BANDS = ['#12414E','#1C5D6B','#2A7E88','#469E9C','#6DBBA8','#9CD4A6'];
@@ -239,6 +278,18 @@ function pin(color, icon) {
 
 let mode = 'work', home = null, homeMarker = null;
 let dir = 'toWork';
+let maxTransfers = -1;
+
+for (const b of document.querySelectorAll('#xfer button')) {
+  b.onclick = () => {
+    maxTransfers = +b.dataset.v;
+    for (const o of document.querySelectorAll('#xfer button')) {
+      o.setAttribute('aria-pressed', String(o === b));
+    }
+    solve();
+    if (home) worker.postMessage({ type: 'itinerary', lat: home.lat, lon: home.lon });
+  };
+}
 
 function setDir(d) {
   dir = d;
@@ -326,7 +377,9 @@ worker.onmessage = ev => {
       `${meta.nStops.toLocaleString('fi')} pysäkkiä · ${meta.nConn.toLocaleString('fi')} yhteyttä<br>` +
       (meta.hasWalk ? `kävelyrasteri ${(meta.walkCells / 1e6).toFixed(1)} M ruutua<br>`
                     : `<span class="warn">kävelyrasteri puuttuu</span><br>`) +
-      (meta.hasRail ? `rataverkko ${(meta.railCellCount / 1000).toFixed(0)} k ruutua<br>`
+      (meta.hasWays ? `katuverkko ${meta.nWays.toLocaleString('fi')} väylää<br>`
+                    : `<span class="warn">katuverkko puuttuu — aja build uudelleen</span><br>`) +
+      (meta.hasRail ? `rataverkko ${meta.nRailWays.toLocaleString('fi')} osuutta<br>`
                     : `<span class="warn">rataverkko puuttuu — aja build uudelleen</span><br>`) +
       `Napauta karttaa asettaaksesi työpaikan.`;
     loadWays('./data')
@@ -560,7 +613,7 @@ function ensureRouteLayers() {
     filter: ['==', ['get', 'mode'], 'transit'],
     layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: {
-      'line-color': transitColorExpr(), 'line-opacity': 1,
+      'line-color': ['coalesce', ['get', 'color'], BUS_COLOR], 'line-opacity': 1,
       'line-width': ['interpolate', ['linear'], ['zoom'], 9, 3.5, 14, 6.5, 17, 11]
     }
   });
@@ -569,7 +622,8 @@ function ensureRouteLayers() {
     filter: ['==', ['geometry-type'], 'Point'],
     paint: {
       'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 3, 14, 5.5, 17, 8],
-      'circle-color': '#0F1A1E', 'circle-stroke-color': '#EDF3F4', 'circle-stroke-width': 2
+      'circle-color': '#0F1A1E',
+      'circle-stroke-color': ['coalesce', ['get', 'color'], '#EDF3F4'], 'circle-stroke-width': 2
     }
   });
 }
@@ -584,9 +638,12 @@ function drawRoute(geom) {
   const feats = [];
   for (const g of geom) {
     if (!g.coords || g.coords.length < 2) continue;
-    feats.push({ type: 'Feature', properties: { mode: g.mode, rt: g.rt == null ? 3 : g.rt }, geometry: { type: 'LineString', coordinates: g.coords } });
+    const col = g.mode === 'transit' ? routeColor(g.rt, g.line) : '#EDF3F4';
+    feats.push({ type: 'Feature',
+      properties: { mode: g.mode, rt: g.rt == null ? 3 : g.rt, color: col },
+      geometry: { type: 'LineString', coordinates: g.coords } });
     if (g.mode === 'transit') {
-      for (const c of g.coords) feats.push({ type: 'Feature', properties: { rt: g.rt }, geometry: { type: 'Point', coordinates: c } });
+      for (const c of g.coords) feats.push({ type: 'Feature', properties: { color: col }, geometry: { type: 'Point', coordinates: c } });
     }
   }
   map.getSource('route').setData({ type: 'FeatureCollection', features: feats });
@@ -621,7 +678,7 @@ function drawTrip(m) {
            `<span class="d">${L.last ? 'Kävele työpaikalle' : 'Vaihto'} ` +
            `<small>${L.last ? 'perillä ' + hhmm(L.arr) : L.toName}</small></span></div>`;
     } else {
-      const col = modeColor(L.rt);
+      const col = routeColor(L.rt, L.line);
       h += `<div class="leg"><span class="tm">${hhmm(L.dep)}</span>` +
            `<span class="pill" style="background:${col}">${L.line}</span>` +
            `<span class="d">${L.kind}${L.head ? ' → ' + L.head : ''}<br>` +
@@ -647,6 +704,7 @@ function solve(opts) {
     lat: work.lat, lon: work.lon,
     arriveFrom: a0, arriveTo: a1, step: 300,
     direction: dir,
+    maxTransfers,
     maxTravel: +$('#maxT').value * 60,
     walkMps: +$('#spd').value / 3.6,
     maxWalkSec: +$('#walk').value * 60,

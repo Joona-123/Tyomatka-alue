@@ -20,12 +20,17 @@ export function csaBackward(D, o) {
   const minTransfer = o.minTransfer ?? 120;
   const earliest = o.earliest ?? 0;
 
+  const maxBoards = (o.maxTransfers == null || o.maxTransfers < 0)
+    ? 255 : Math.min(255, o.maxTransfers + 1);
+
   const latest = new Int32Array(nStops).fill(-1);
   const viaConn = new Int32Array(nStops).fill(-1);
   const viaFoot = new Int32Array(nStops).fill(-1);
   const isTarget = new Uint8Array(nStops);
   const targetWalk = new Int32Array(nStops).fill(-1);
+  const boards = new Uint8Array(nStops);          // nousuja talta pysakilta maaliin
   const onTrip = new Uint8Array(nTrips);
+  const tripBoards = new Uint8Array(nTrips);
 
   for (const [s, walkSec] of o.sources) {
     const t = o.arriveBy - walkSec;
@@ -45,24 +50,31 @@ export function csaBackward(D, o) {
     const dep = DEP[i];
     if (dep < earliest) break;
     const tr = TRIP[i];
+    let nb2;
     let usable = onTrip[tr] === 1;
-    if (!usable) {
-      const lt = latest[TO[i]];
-      usable = lt >= 0 && ARR[i] + minTransfer <= lt;
+    if (usable) nb2 = tripBoards[tr];
+    else {
+      const t = TO[i], lt = latest[t];
+      if (lt >= 0 && ARR[i] + minTransfer <= lt) {
+        nb2 = boards[t] + 1;
+        usable = nb2 <= maxBoards;
+      }
     }
     if (!usable) continue;
-    onTrip[tr] = 1;
+    onTrip[tr] = 1; tripBoards[tr] = nb2;
 
     const f = FROM[i];
     if (dep > latest[f]) {
-      latest[f] = dep; viaConn[f] = i; viaFoot[f] = -1;
+      latest[f] = dep; viaConn[f] = i; viaFoot[f] = -1; boards[f] = nb2;
       for (let j = footStart[f], e = footStart[f + 1]; j < e; j++) {
         const nb = footTo[j], cand = dep - footSec[j];
-        if (cand > latest[nb]) { latest[nb] = cand; viaConn[nb] = -1; viaFoot[nb] = f; }
+        if (cand > latest[nb]) {
+          latest[nb] = cand; viaConn[nb] = -1; viaFoot[nb] = f; boards[nb] = nb2;
+        }
       }
     }
   }
-  return { latest, viaConn, viaFoot, isTarget, targetWalk, arriveBy: o.arriveBy };
+  return { latest, viaConn, viaFoot, isTarget, targetWalk, boards, arriveBy: o.arriveBy };
 }
 
 /* ------------------------------------------------------------------ */
@@ -366,7 +378,7 @@ export function csaWindow(D, o) {
     const arriveBy = times[k];
     const res = csaBackward(D, {
       arriveBy, sources: o.sources, minTransfer: o.minTransfer,
-      earliest: arriveBy - o.maxTravel
+      maxTransfers: o.maxTransfers, earliest: arriveBy - o.maxTravel
     });
     runs.push(res);
     const L = res.latest;
@@ -524,12 +536,17 @@ export function csaForward(D, o) {
   const { DEP, ARR, FROM, TO, TRIP, footStart, footTo, footSec, nStops, nTrips } = D;
   const minTransfer = o.minTransfer ?? 120;
 
+  const maxBoards = (o.maxTransfers == null || o.maxTransfers < 0)
+    ? 255 : Math.min(255, o.maxTransfers + 1);
+
   const earliest = new Int32Array(nStops).fill(INF32);
   const viaConn = new Int32Array(nStops).fill(-1);
   const viaFoot = new Int32Array(nStops).fill(-1);
   const isSource = new Uint8Array(nStops);
   const sourceWalk = new Int32Array(nStops).fill(-1);
+  const boards = new Uint8Array(nStops);
   const onTrip = new Uint8Array(nTrips);
+  const tripBoards = new Uint8Array(nTrips);
 
   for (const [s, walkSec] of o.sources) {
     const t = o.departAt + walkSec;
@@ -551,24 +568,31 @@ export function csaForward(D, o) {
     if (dep > horizon) break;
     if (dep < o.departAt) continue;
     const tr = TRIP[i], f = FROM[i];
+    let nb2;
     let usable = onTrip[tr] === 1;
-    if (!usable) {
+    if (usable) nb2 = tripBoards[tr];
+    else {
       const e = earliest[f];
-      if (e !== INF32) usable = isSource[f] ? e <= dep : e + minTransfer <= dep;
+      if (e !== INF32 && (isSource[f] ? e <= dep : e + minTransfer <= dep)) {
+        nb2 = boards[f] + 1;
+        usable = nb2 <= maxBoards;
+      }
     }
     if (!usable) continue;
-    onTrip[tr] = 1;
+    onTrip[tr] = 1; tripBoards[tr] = nb2;
 
     const t = TO[i];
     if (ARR[i] < earliest[t]) {
-      earliest[t] = ARR[i]; viaConn[t] = i; viaFoot[t] = -1;
+      earliest[t] = ARR[i]; viaConn[t] = i; viaFoot[t] = -1; boards[t] = nb2;
       for (let j = footStart[t], e2 = footStart[t + 1]; j < e2; j++) {
         const n = footTo[j], cand = ARR[i] + footSec[j];
-        if (cand < earliest[n]) { earliest[n] = cand; viaConn[n] = -1; viaFoot[n] = t; }
+        if (cand < earliest[n]) {
+          earliest[n] = cand; viaConn[n] = -1; viaFoot[n] = t; boards[n] = nb2;
+        }
       }
     }
   }
-  return { earliest, viaConn, viaFoot, isSource, sourceWalk, departAt: o.departAt };
+  return { earliest, viaConn, viaFoot, isSource, sourceWalk, boards, departAt: o.departAt };
 }
 
 /** Ajaa eteenpain-CSA:n usealle lahtoajalle ja poimii nopeimman per pysakki. */
@@ -582,7 +606,7 @@ export function csaWindowForward(D, o) {
   const runs = [];
   for (let k = 0; k < times.length; k++) {
     const res = csaForward(D, {
-      departAt: times[k], sources: o.sources,
+      departAt: times[k], sources: o.sources, maxTransfers: o.maxTransfers,
       minTransfer: o.minTransfer, maxTravel: o.maxTravel
     });
     runs.push(res);
@@ -640,4 +664,168 @@ export function reconstructForward(D, res, ti, to, o) {
     legs, firstWalk: w0, firstStop: s,
     departure: res.departAt, arrival: earliest[to]
   };
+}
+
+/* ------------------------------------------------------------------ */
+/* 7. Tarkka reititys viivageometrialla (ei rasteria)                  */
+/* ------------------------------------------------------------------ */
+
+/** Rakentaa vaylakokoelman ja vaylakohtaiset rajat nopeaa rajausta varten. */
+export function makeWays(start, ax, ay, dx, dy, kind) {
+  const n = ax.length;
+  const bx0 = new Int32Array(n), bx1 = new Int32Array(n),
+        by0 = new Int32Array(n), by1 = new Int32Array(n);
+  for (let k = 0; k < n; k++) {
+    let x = ax[k], y = ay[k], mnx = 2e9, mny = 2e9, mxx = -2e9, mxy = -2e9;
+    for (let j = start[k]; j < start[k + 1]; j++) {
+      x += dx[j]; y += dy[j];
+      if (x < mnx) mnx = x; if (x > mxx) mxx = x;
+      if (y < mny) mny = y; if (y > mxy) mxy = y;
+    }
+    bx0[k] = mnx; bx1[k] = mxx; by0[k] = mny; by1[k] = mxy;
+  }
+  // Karkea hakemistoruudukko. Ilman tata jokainen reitityskutsu kavisi lapi
+  // kaikki sadattuhannet vaylat, mika tekee raahauksesta kaytannossa jumin.
+  const GS = 4000;
+  const idx = new Map();
+  for (let k = 0; k < n; k++) {
+    const ia = Math.floor(bx0[k] / GS), ib = Math.floor(bx1[k] / GS);
+    const ja = Math.floor(by0[k] / GS), jb = Math.floor(by1[k] / GS);
+    for (let i = ia; i <= ib; i++) for (let j = ja; j <= jb; j++) {
+      const key = i * 100000 + j;
+      let a = idx.get(key);
+      if (!a) idx.set(key, a = []);
+      a.push(k);
+    }
+  }
+  return { start, ax, ay, dx, dy, kind, n, bx0, bx1, by0, by1, idx, GS };
+}
+
+/** Minimikeko Dijkstraa varten. */
+function Heap() {
+  const k = [], v = [];
+  return {
+    size: () => k.length,
+    push(key, val) {
+      k.push(key); v.push(val);
+      let i = k.length - 1;
+      while (i > 0) {
+        const p = (i - 1) >> 1;
+        if (k[p] <= k[i]) break;
+        [k[p], k[i]] = [k[i], k[p]]; [v[p], v[i]] = [v[i], v[p]]; i = p;
+      }
+    },
+    pop() {
+      const top = v[0], tk = k[0];
+      const lk = k.pop(), lv = v.pop();
+      if (k.length) {
+        k[0] = lk; v[0] = lv;
+        let i = 0;
+        for (;;) {
+          const l = 2 * i + 1, r = l + 1;
+          let m = i;
+          if (l < k.length && k[l] < k[m]) m = l;
+          if (r < k.length && k[r] < k[m]) m = r;
+          if (m === i) break;
+          [k[m], k[i]] = [k[i], k[m]]; [v[m], v[i]] = [v[i], v[m]]; i = m;
+        }
+      }
+      return [tk, top];
+    }
+  };
+}
+
+const WKEY = 20000000;
+
+/**
+ * Lyhin reitti kahden pisteen valilla TODELLISTA viivaverkkoa pitkin.
+ * Rakentaa vain paikallisen aliverkon, joten muistinkaytto pysyy pienena.
+ *
+ * @param W        makeWays()-kokoelma
+ * @param from,to  [mercX, mercY]
+ * @param mask     kind-bittimaski (0 = kaikki)
+ * @returns {{coords:[[lon,lat]], merc:number}|null}
+ */
+export function routeOnWays(W, from, to, mask = 0, tries = 2) {
+  const span = Math.hypot(to[0] - from[0], to[1] - from[1]);
+  for (let attempt = 0; attempt < tries; attempt++) {
+    const pad = Math.max(1500, span * (0.6 + attempt * 1.2));
+    const qx0 = Math.min(from[0], to[0]) - pad, qx1 = Math.max(from[0], to[0]) + pad;
+    const qy0 = Math.min(from[1], to[1]) - pad, qy1 = Math.max(from[1], to[1]) + pad;
+
+    const id = new Map();
+    const NX = [], NY = [], adj = [];
+    const node = (x, y) => {
+      const key = x * WKEY + y;
+      let i = id.get(key);
+      if (i === undefined) { i = NX.length; id.set(key, i); NX.push(x); NY.push(y); adj.push([]); }
+      return i;
+    };
+
+    const cand = [];
+    if (W.idx) {
+      const seenW = new Set();
+      const ia = Math.floor(qx0 / W.GS), ib = Math.floor(qx1 / W.GS);
+      const ja = Math.floor(qy0 / W.GS), jb = Math.floor(qy1 / W.GS);
+      for (let i = ia; i <= ib; i++) for (let j = ja; j <= jb; j++) {
+        const a = W.idx.get(i * 100000 + j);
+        if (!a) continue;
+        for (const k of a) if (!seenW.has(k)) { seenW.add(k); cand.push(k); }
+      }
+    } else {
+      for (let k = 0; k < W.n; k++) cand.push(k);
+    }
+
+    for (const k of cand) {
+      if (mask && !(W.kind[k] & mask)) continue;
+      if (W.bx1[k] < qx0 || W.bx0[k] > qx1 || W.by1[k] < qy0 || W.by0[k] > qy1) continue;
+      let x = W.ax[k], y = W.ay[k], prev = -1;
+      for (let j = W.start[k]; j < W.start[k + 1]; j++) {
+        x += W.dx[j]; y += W.dy[j];
+        const cur = node(x, y);
+        if (prev >= 0 && prev !== cur) {
+          const w = Math.hypot(NX[cur] - NX[prev], NY[cur] - NY[prev]);
+          adj[prev].push(cur, w);
+          adj[cur].push(prev, w);
+        }
+        prev = cur;
+      }
+    }
+    if (NX.length < 2) continue;
+
+    const near = p => {
+      let best = -1, bd = Infinity;
+      for (let i = 0; i < NX.length; i++) {
+        const d = (NX[i] - p[0]) ** 2 + (NY[i] - p[1]) ** 2;
+        if (d < bd) { bd = d; best = i; }
+      }
+      return best;
+    };
+    const a = near(from), b = near(to);
+    if (a < 0 || b < 0 || a === b) continue;
+
+    const dist = new Float64Array(NX.length).fill(Infinity);
+    const prevN = new Int32Array(NX.length).fill(-1);
+    const done = new Uint8Array(NX.length);
+    const h = Heap();
+    dist[a] = 0; h.push(0, a);
+    while (h.size()) {
+      const [d, u] = h.pop();
+      if (done[u]) continue;
+      done[u] = 1;
+      if (u === b) break;
+      const e = adj[u];
+      for (let i = 0; i < e.length; i += 2) {
+        const v = e[i], nd = d + e[i + 1];
+        if (nd < dist[v]) { dist[v] = nd; prevN[v] = u; h.push(nd, v); }
+      }
+    }
+    if (!isFinite(dist[b])) continue;
+
+    const out = [];
+    for (let c = b; c >= 0; c = prevN[c]) out.push([mercToLon(NX[c]), mercToLat(NY[c])]);
+    out.reverse();
+    return { coords: out, merc: dist[b] };
+  }
+  return null;
 }
