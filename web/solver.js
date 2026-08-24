@@ -252,6 +252,7 @@ export function buildGridWalk(D, transit, walk, o) {
   return {
     grid: out, road, w, h,
     bounds: [mercToLon(bx0), mercToLat(by1), mercToLon(bx1), mercToLat(by0)],
+    mercX0: bx0, mercY0: by0, mercCell,
     reachableStops: seeded
   };
 }

@@ -234,6 +234,9 @@ worker.onmessage = ev => {
       (meta.hasWalk ? `kävelyrasteri ${(meta.walkCells / 1e6).toFixed(1)} M ruutua<br>`
                     : `<span class="warn">kävelyrasteri puuttuu</span><br>`) +
       `Napauta karttaa asettaaksesi työpaikan.`;
+    loadWays('./data')
+      .then(n => { $('#status').innerHTML += `<br>${n.toLocaleString('fi')} väylää vektorina`; updateLines(); })
+      .catch(e => { $('#status').innerHTML += `<br><span class="warn">viivat: ${e.message}</span>`; });
     if (pending) solve();
   } else if (m.type === 'result') {
     if (m.empty) { $('#status').innerHTML = `<span class="warn">${m.empty}</span>`; clearIso(); return; }
@@ -251,6 +254,130 @@ function clearIso() {
   if (map.getLayer('iso')) map.removeLayer('iso');
   if (map.getSource('iso')) map.removeSource('iso');
 }
+
+/* ---------- vektoriviivat ---------- */
+const VZ = 11.5;            // taman yli piirretaan oikeat viivat rasterin sijaan
+const MAXFEAT = 14000;
+let ways = null, lastRes = null;
+
+async function loadWays(base) {
+  const b = async (n, T) => {
+    const r = await fetch(`${base}/${n}`);
+    if (!r.ok) throw new Error(`${n}: HTTP ${r.status}`);
+    return new T(await r.arrayBuffer());
+  };
+  const [start, ax, ay, dx, dy] = await Promise.all([
+    b('way_start.bin', Uint32Array), b('way_ax.bin', Int32Array),
+    b('way_ay.bin', Int32Array), b('way_dx.bin', Int16Array), b('way_dy.bin', Int16Array)
+  ]);
+  // vaylakohtaiset rajat nopeaa nakymarajausta varten
+  const n = ax.length;
+  const bx0 = new Int32Array(n), bx1 = new Int32Array(n),
+        by0 = new Int32Array(n), by1 = new Int32Array(n);
+  for (let k = 0; k < n; k++) {
+    let x = ax[k], y = ay[k], mnx = 2e9, mny = 2e9, mxx = -2e9, mxy = -2e9;
+    for (let j = start[k]; j < start[k + 1]; j++) {
+      x += dx[j]; y += dy[j];
+      if (x < mnx) mnx = x; if (x > mxx) mxx = x;
+      if (y < mny) mny = y; if (y > mxy) mxy = y;
+    }
+    bx0[k] = mnx; bx1[k] = mxx; by0[k] = mny; by1[k] = mxy;
+  }
+  ways = { start, ax, ay, dx, dy, n, bx0, bx1, by0, by1 };
+  return n;
+}
+
+function ensureLineLayers() {
+  if (map.getSource('isoline')) return;
+  map.addSource('isoline', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({
+    id: 'isoline-case', type: 'line', source: 'isoline', minzoom: VZ,
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: {
+      'line-color': '#0B1417',
+      'line-opacity': 0.85,
+      'line-width': ['interpolate', ['linear'], ['zoom'], 11.5, 3, 14, 7, 17, 15]
+    }
+  });
+  map.addLayer({
+    id: 'isoline', type: 'line', source: 'isoline', minzoom: VZ,
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: {
+      'line-color': '#5FD3C4',
+      'line-width': ['interpolate', ['linear'], ['zoom'], 11.5, 1.4, 14, 4, 17, 10]
+    }
+  });
+}
+
+function updateLines() {
+  if (!ways || !lastRes || map.getZoom() < VZ) return;
+  ensureLineLayers();
+
+  const r = lastRes;
+  const maxT = +$('#maxT').value * 60;
+  const nb = Math.max(1, Math.round(maxT / 300));
+  const cols = bandColors(nb);
+
+  // nakymän rajat mercatorissa, pienellä marginaalilla
+  const bb = map.getBounds();
+  const pad = (lonToMercX(bb.getEast()) - lonToMercX(bb.getWest())) * 0.15;
+  const vx0 = lonToMercX(bb.getWest()) - pad, vx1 = lonToMercX(bb.getEast()) + pad;
+  const vy0 = latToMercY(bb.getSouth()) - pad, vy1 = latToMercY(bb.getNorth()) + pad;
+
+  const timeAt = (x, y) => {
+    const i = Math.floor((x - r.mercX0) / r.mercCell);
+    const j = Math.floor((y - r.mercY0) / r.mercCell);
+    if (i < 0 || i >= r.w || j < 0 || j >= r.h) return -1;
+    const v = r.grid[j * r.w + i];
+    return isFinite(v) && v <= maxT ? v : -1;
+  };
+
+  const feats = [];
+  const W = ways;
+  outer:
+  for (let k = 0; k < W.n; k++) {
+    if (W.bx1[k] < vx0 || W.bx0[k] > vx1 || W.by1[k] < vy0 || W.by0[k] > vy1) continue;
+    let x = W.ax[k], y = W.ay[k];
+    let run = null, runB = -1;
+    for (let j = W.start[k]; j < W.start[k + 1]; j++) {
+      x += W.dx[j]; y += W.dy[j];
+      const t = timeAt(x, y);
+      const b = t < 0 ? -1 : Math.min(nb - 1, Math.floor(t / maxT * nb));
+      const ll = [mercXToLon(x), mercYToLat(y)];
+      if (b < 0) {
+        if (run && run.length > 1) feats.push({ type: 'Feature', properties: { b: runB }, geometry: { type: 'LineString', coordinates: run } });
+        run = null; runB = -1;
+        continue;
+      }
+      if (!run) { run = [ll]; runB = b; continue; }
+      if (b !== runB) {
+        run.push(ll);
+        if (run.length > 1) feats.push({ type: 'Feature', properties: { b: runB }, geometry: { type: 'LineString', coordinates: run } });
+        if (feats.length >= MAXFEAT) break outer;
+        run = [ll]; runB = b;
+        continue;
+      }
+      run.push(ll);
+    }
+    if (run && run.length > 1) feats.push({ type: 'Feature', properties: { b: runB }, geometry: { type: 'LineString', coordinates: run } });
+    if (feats.length >= MAXFEAT) break;
+  }
+
+  const match = ['match', ['get', 'b']];
+  for (let i = 0; i < nb; i++) match.push(i, cols[i]);
+  match.push(cols[nb - 1]);
+  map.setPaintProperty('isoline', 'line-color', match);
+  map.getSource('isoline').setData({ type: 'FeatureCollection', features: feats });
+}
+
+const R_E = 6378137;
+const lonToMercX = lon => R_E * lon * Math.PI / 180;
+const latToMercY = lat => R_E * Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360));
+const mercXToLon = x => x / R_E * 180 / Math.PI;
+const mercYToLat = y => (2 * Math.atan(Math.exp(y / R_E)) - Math.PI / 2) * 180 / Math.PI;
+
+let lt = null;
+map.on('moveend', () => { clearTimeout(lt); lt = setTimeout(updateLines, 60); });
 
 function draw(r) {
   if (!map.isStyleLoaded()) { map.once('idle', () => draw(r)); return; }
@@ -277,6 +404,7 @@ function draw(r) {
     }
   }
   ctx.putImageData(img, 0, 0);
+  lastRes = r;
 
   const [W, N, E, S] = r.bounds;
   clearIso();
@@ -284,13 +412,14 @@ function draw(r) {
     type: 'canvas', canvas: 'isoCanvas', animate: false,
     coordinates: [[W, N], [E, N], [E, S], [W, S]]
   });
-  map.addLayer({ id: 'iso', type: 'raster', source: 'iso',
+  map.addLayer({ id: 'iso', type: 'raster', source: 'iso', maxzoom: VZ,
     paint: { 'raster-opacity': 1, 'raster-resampling': 'nearest', 'raster-fade-duration': 0 } });
 
   $('#status').innerHTML =
     `<b>${r.reachableStops.toLocaleString('fi')}</b> pysäkkiä · <b>${r.km2}</b> km² tavoitettavissa<br>` +
     `<b>${r.runs}</b> saapumisaikaa · laskenta <b>${r.ms} ms</b><br>` +
     `kävely katuverkkoa pitkin`;
+  updateLines();
 }
 
 const hhmm = t => `${String(Math.floor(t / 3600) % 24).padStart(2, '0')}.${String(Math.floor(t / 60) % 60).padStart(2, '0')}`;
