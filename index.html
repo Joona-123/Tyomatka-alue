@@ -1,0 +1,825 @@
+<!doctype html>
+<html lang="fi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Työmatka-alue</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<style>
+  :root{
+    --panel:#0F1A1E; --ink:#DCE7E9; --muted:#7C9298; --line:#22343A;
+    --accent:#5FD3C4; --edge:#E8A33D;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    background:var(--panel);color:var(--ink);overscroll-behavior:none}
+  #map{position:absolute;inset:0}
+  .maplibregl-ctrl-attrib{font-size:10px}
+
+  #title{position:absolute;top:0;left:0;right:0;z-index:2;padding:10px 14px;
+    background:linear-gradient(180deg,rgba(15,26,30,.92),rgba(15,26,30,0));
+    pointer-events:none}
+  #title h1{margin:0;font-size:15px;font-weight:650;letter-spacing:-.01em}
+  #title p{margin:3px 0 0;font-size:12px;color:#B7C9CD;text-shadow:0 1px 3px rgba(0,0,0,.9)}
+  #title p b{color:var(--edge)}
+
+  #panel{position:absolute;left:0;right:0;bottom:0;z-index:3;background:var(--panel);
+    border-top:1px solid var(--line);padding:0 14px calc(12px + env(safe-area-inset-bottom));
+    max-height:66vh;overflow:auto;box-shadow:0 -12px 30px rgba(0,0,0,.45);
+    transition:max-height .22s cubic-bezier(.3,.8,.4,1), height .22s cubic-bezier(.3,.8,.4,1);
+    touch-action:pan-y}
+  #panel.drag{transition:none}
+  #panel.min{max-height:44px;overflow:hidden}
+  #grab{position:sticky;top:0;z-index:1;background:var(--panel);margin:0 -14px 8px;
+    padding:14px 0 10px;cursor:grab;touch-action:none;user-select:none;
+    -webkit-user-select:none;-webkit-tap-highlight-color:transparent}
+  #grab::before{content:'';display:block;width:42px;height:4px;border-radius:2px;
+    background:#3A5057;margin:0 auto}
+  #grab:active{cursor:grabbing}
+  #panel.min #grab::before{background:var(--accent)}
+  @media(min-width:760px){
+    #panel{left:auto;top:0;bottom:0;width:330px;max-height:none;border-top:0;border-left:1px solid var(--line);
+      padding-top:56px;max-height:none !important}
+    #grab{display:none}
+    #title{right:330px}
+  }
+
+  .grp{margin:0 0 12px}
+  .lbl{display:flex;justify-content:space-between;align-items:baseline;
+    font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin-bottom:5px}
+  .val{font-family:var(--mono);font-size:13px;color:var(--ink);letter-spacing:0}
+  input[type=range]{width:100%;accent-color:var(--accent);margin:0}
+  input[type=time]{font-family:var(--mono);font-size:15px;background:#16262B;color:var(--ink);
+    border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:100%}
+  .tw{display:flex;gap:8px;align-items:center}
+  .tw span{color:var(--muted);font-family:var(--mono)}
+
+  #legend{display:flex;gap:2px;margin:2px 0 6px}
+  #legend button{flex:1;height:26px;border:0;border-radius:3px;cursor:pointer;position:relative;
+    font-family:var(--mono);font-size:10px;color:#0B1417;padding:0}
+  #legend button[aria-pressed=true]{outline:2px solid var(--ink);outline-offset:1px}
+  .legcap{display:flex;justify-content:space-between;font-family:var(--mono);
+    font-size:10px;color:var(--muted)}
+
+  #modes, .seg{display:flex;gap:6px}
+  #modes button, .seg button{flex:1;padding:8px;border-radius:6px;border:1px solid var(--line);
+    background:#16262B;color:var(--muted);font-size:13px;cursor:pointer}
+  #modes button[aria-pressed=true], .seg button[aria-pressed=true]{background:var(--accent);color:#0B1417;border-color:var(--accent);font-weight:600}
+
+  #trip{margin:0 0 12px}
+  #trip:empty{display:none}
+  .thead{display:flex;justify-content:space-between;align-items:baseline;
+    border-top:1px solid var(--line);padding-top:9px;margin-bottom:7px}
+  .thead .t{font-family:var(--mono);font-size:19px;color:var(--edge)}
+  .thead .s{font-size:11px;color:var(--muted)}
+  .leg{display:flex;gap:9px;align-items:flex-start;padding:4px 0;font-size:12.5px}
+  .leg .tm{font-family:var(--mono);font-size:12px;color:var(--muted);min-width:38px;padding-top:2px}
+  .leg .pill{font-family:var(--mono);font-size:12px;font-weight:700;color:#fff;
+    background:var(--accent);border-radius:4px;padding:2px 7px;min-width:34px;text-align:center}
+  .leg .pill.walk{background:transparent;color:var(--muted);border:1px dashed var(--line);font-weight:400}
+  .leg .d{flex:1;line-height:1.35}
+  .leg .d small{color:var(--muted)}
+
+  #status{font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.5;
+    border-top:1px solid var(--line);padding-top:8px;margin-top:2px}
+  #status b{color:var(--accent);font-weight:600}
+  #status .warn{color:var(--edge)}
+  #isoCanvas{display:none}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<canvas id="isoCanvas" width="1" height="1"></canvas>
+
+<div id="title">
+  <h1>Työmatka-alue</h1>
+  <p id="hint">Napauta karttaa: <b>työpaikka</b></p>
+</div>
+
+<div id="panel">
+  <div id="grab" role="button" tabindex="0" aria-label="Näytä tai piilota asetukset"></div>
+
+  <div class="grp">
+    <div class="lbl"><span>Laskentasuunta</span></div>
+    <div id="modes">
+      <button id="dWork" type="button" aria-pressed="true">Töihin</button>
+      <button id="dHome" type="button">Kotoa pois</button>
+    </div>
+  </div>
+
+  <div class="grp">
+    <div class="lbl"><span id="lTime">Perillä välillä</span><span class="val" id="vRuns"></span></div>
+    <div class="tw">
+      <input type="time" id="arrFrom" value="07:30" step="300">
+      <span>–</span>
+      <input type="time" id="arrTo" value="08:30" step="300">
+    </div>
+  </div>
+
+  <div class="grp">
+    <div class="lbl"><span>Matka-aika enintään</span><span class="val" id="vMax">45 min</span></div>
+    <div id="legend"></div>
+    <div class="legcap"><span>nopea</span><span>ruutu 100 m</span><span>rajalla</span></div>
+    <input type="range" id="maxT" min="15" max="90" step="5" value="45">
+  </div>
+
+  <div class="grp">
+    <div class="lbl"><span>Vaihtoja enintään</span></div>
+    <div id="xfer" class="seg">
+      <button type="button" data-v="0">0</button>
+      <button type="button" data-v="1">1</button>
+      <button type="button" data-v="2">2</button>
+      <button type="button" data-v="3">3</button>
+      <button type="button" data-v="-1" aria-pressed="true">∞</button>
+    </div>
+  </div>
+
+  <div class="grp">
+    <div class="lbl"><span>Kävelynopeus</span><span class="val" id="vSpd">4,5 km/h</span></div>
+    <input type="range" id="spd" min="3" max="6" step="0.1" value="4.5">
+  </div>
+
+  <div class="grp">
+    <div class="lbl"><span>Pisin kävely yhteen suuntaan</span><span class="val" id="vWalk">15 min</span></div>
+    <input type="range" id="walk" min="5" max="30" step="1" value="15">
+  </div>
+
+  <div class="grp" id="modeRow" style="display:none">
+    <div class="lbl"><span>Napautus asettaa</span></div>
+    <div id="modes">
+      <button id="mWork" type="button">Työpaikan</button>
+      <button id="mHome" type="button" aria-pressed="true">Kodin</button>
+    </div>
+  </div>
+
+  <div id="trip"></div>
+
+  <div id="status">Ladataan aikataulutietoja…</div>
+</div>
+
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script type="module">
+const $ = s => document.querySelector(s);
+
+/* --- kulkuvälinevärit, HSL:n vakiintuneen jaon mukaan --- */
+const MODE_COLORS = [
+  0, '#00985F',    // ratikka
+  5, '#00985F',
+  900, '#00985F',
+  1, '#FF6319',    // metro
+  400, '#FF6319',
+  401, '#FF6319',
+  2, '#8C4799',    // juna
+  100, '#8C4799',
+  109, '#8C4799',
+  4, '#00B9E4',    // lautta
+  1000, '#00B9E4',
+  11, '#0074BE'    // johdinauto
+];
+const BUS_COLOR = '#0074BE';
+const transitColorExpr = () => ['match', ['get', 'rt'], ...MODE_COLORS, BUS_COLOR];
+
+// Kulkuvalineen perussavy, jota linjan nimi kiertaa hieman. Nain kaksi eri
+// bussia erottuvat toisistaan mutta molemmat nakyvat yha bussin sinisena.
+const MODE_HUE = {
+  0: 152, 5: 152, 900: 152,        // ratikka
+  1: 22, 400: 22, 401: 22,         // metro
+  2: 288, 100: 288, 109: 288,      // juna
+  4: 192, 1000: 192,               // lautta
+  3: 205, 11: 205, 700: 205, 701: 205, 704: 205, 715: 205
+};
+function hueFor(rt) {
+  if (MODE_HUE[rt] != null) return MODE_HUE[rt];
+  if (rt >= 900 && rt < 1000) return 152;
+  if (rt >= 100 && rt < 200) return 288;
+  if (rt >= 400 && rt < 500) return 22;
+  return 205;
+}
+function routeColor(rt, name) {
+  const h0 = hueFor(rt);
+  let h = 2166136261;
+  const str = String(name == null ? '' : name);
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+  const a = Math.abs(h);
+  const hue = ((h0 + ((a % 9) - 4) * 7) % 360 + 360) % 360;
+  const sat = 60 + ((a >>> 4) % 3) * 13;
+  const lig = 45 + ((a >>> 8) % 3) * 8;
+  return `hsl(${hue}, ${sat}%, ${lig}%)`;
+}
+
+/* --- värit: portaittaiset 5 min kaistat, reunimmainen lämmin = "juuri ja juuri" --- */
+const BANDS = ['#12414E','#1C5D6B','#2A7E88','#469E9C','#6DBBA8','#9CD4A6'];
+const EDGE  = '#E8A33D';
+const bandColors = n => {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const t = n === 1 ? 0 : i / (n - 1);
+    out.push(BANDS[Math.min(BANDS.length - 1, Math.round(t * (BANDS.length - 1)))]);
+  }
+  out[n - 1] = EDGE;
+  return out;
+};
+const hex2rgb = h => [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)];
+
+/* --- kartta --- */
+const map = new maplibregl.Map({
+  container: 'map',
+  style: {
+    version: 8,
+    sources: { osm: {
+      type: 'raster', tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+      tileSize: 256, maxzoom: 19,
+      attribution: '© OpenStreetMap-tekijät · Aikataulut © HSL, CC BY 4.0'
+    }},
+    layers: [
+      { id: 'bg', type: 'background', paint: { 'background-color': '#0F1A1E' } },
+      { id: 'osm', type: 'raster', source: 'osm', paint: { 'raster-saturation': -0.85, 'raster-brightness-min': 0.12, 'raster-brightness-max': 0.62, 'raster-opacity': 0.85 } }
+    ]
+  },
+  center: [24.94, 60.19], zoom: 9, attributionControl: { compact: true }
+});
+map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
+map.on('load', ensureRouteLayers);
+
+// reittiviiva on aina päällimmäisenä: muut tasot lisätään sen alle
+const under = () => (map.getLayer('route-case') ? 'route-case' : undefined);
+
+let marker = null, work = null, meta = null, ready = false, pending = false;
+
+const ICON_HOME = '<path d="M12 3.2 3.6 10.1v10.7h6.1v-6h4.6v6h6.1V10.1z"/>';
+const ICON_WORK = '<path d="M9.4 3.4h5.2q1.1 0 1.1 1.1v1.8h3.6q1.2 0 1.2 1.2v11q0 1.2-1.2 1.2H4.7q-1.2 0-1.2-1.2v-11q0-1.2 1.2-1.2h3.6V4.5q0-1.1 1.1-1.1m.9 2.9h3.4V5.2h-3.4z"/>';
+const ICON_PIN = '<path d="M12 2.6a6.7 6.7 0 0 0-6.7 6.7c0 5 6.7 12.1 6.7 12.1s6.7-7.1 6.7-12.1A6.7 6.7 0 0 0 12 2.6m0 9.3a2.6 2.6 0 1 1 0-5.2 2.6 2.6 0 0 1 0 5.2"/>';
+
+// Ankkuri = piste josta lasketaan. Töihin-suunnassa se on työpaikka,
+// Kotoa pois -suunnassa koti. Kuvakkeen on vastattava sitä.
+const anchorIcon = () => dir === 'toWork'
+  ? { color: '#E8A33D', icon: ICON_WORK }
+  : { color: '#5FD3C4', icon: ICON_HOME };
+const probeIcon = () => dir === 'toWork'
+  ? { color: '#5FD3C4', icon: ICON_HOME }
+  : { color: '#E8A33D', icon: ICON_PIN };
+
+function restyle(marker, spec) {
+  if (!marker) return;
+  const el = marker.getElement();
+  el.style.background = spec.color;
+  el.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="#0B1417">' + spec.icon + '</svg>';
+}
+
+function pin(color, icon) {
+  const el = document.createElement('div');
+  el.style.cssText = 'width:34px;height:34px;display:grid;place-items:center;cursor:grab;' +
+    'border-radius:50%;background:' + color + ';border:2.5px solid #0B1417;' +
+    'box-shadow:0 2px 8px rgba(0,0,0,.55)';
+  el.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="#0B1417">' + icon + '</svg>';
+  return el;
+}
+
+let mode = 'work', home = null, homeMarker = null;
+let dir = 'toWork';
+let maxTransfers = -1;
+
+for (const b of document.querySelectorAll('#xfer button')) {
+  b.onclick = () => {
+    maxTransfers = +b.dataset.v;
+    for (const o of document.querySelectorAll('#xfer button')) {
+      o.setAttribute('aria-pressed', String(o === b));
+    }
+    solve();
+    if (home) worker.postMessage({ type: 'itinerary', lat: home.lat, lon: home.lon });
+  };
+}
+
+function setDir(d) {
+  dir = d;
+  $('#dWork').setAttribute('aria-pressed', String(d === 'toWork'));
+  $('#dHome').setAttribute('aria-pressed', String(d === 'fromHome'));
+  $('#lTime').textContent = d === 'toWork' ? 'Perillä välillä' : 'Lähtö välillä';
+  $('#mWork').textContent = d === 'toWork' ? 'Työpaikan' : 'Kodin';
+  $('#mHome').textContent = d === 'toWork' ? 'Kodin' : 'Määränpään';
+  restyle(marker, anchorIcon());
+  restyle(homeMarker, probeIcon());
+  $('#hint').innerHTML = d === 'toWork'
+    ? 'Napauta karttaa: <b>työpaikka</b>'
+    : 'Napauta karttaa: <b>koti</b>';
+  solve();
+  if (home) worker.postMessage({ type: 'itinerary', lat: home.lat, lon: home.lon });
+}
+$('#dWork').onclick = () => setDir('toWork');
+$('#dHome').onclick = () => setDir('fromHome');
+
+map.on('click', e => {
+  if (mode === 'work') setWork(e.lngLat.lat, e.lngLat.lng);
+  else setHome(e.lngLat.lat, e.lngLat.lng);
+});
+
+function setMode(m) {
+  mode = m;
+  $('#mWork').setAttribute('aria-pressed', String(m === 'work'));
+  $('#mHome').setAttribute('aria-pressed', String(m === 'home'));
+  const a = dir === 'toWork' ? 'työpaikka' : 'koti';
+  $('#hint').innerHTML = m === 'work'
+    ? `Napauta karttaa: <b>${a}</b>`
+    : 'Napauta aluetta: <b>paras matkavaihtoehto</b>';
+}
+$('#mWork').onclick = () => setMode('work');
+$('#mHome').onclick = () => setMode('home');
+
+function setHome(lat, lon) {
+  home = { lat, lon };
+  if (!homeMarker) {
+    const pr = probeIcon();
+    const el = pin(pr.color, pr.icon);
+    homeMarker = new maplibregl.Marker({ element: el, draggable: true }).setLngLat([lon, lat]).addTo(map);
+    const upd = () => {
+      const p = homeMarker.getLngLat();
+      home = { lat: p.lat, lon: p.lng };
+      worker.postMessage({ type: 'itinerary', lat: p.lat, lon: p.lng });
+    };
+    homeMarker.on('drag', upd);
+    homeMarker.on('dragend', upd);
+  } else homeMarker.setLngLat([lon, lat]);
+  worker.postMessage({ type: 'itinerary', lat, lon });
+}
+
+function setWork(lat, lon) {
+  work = { lat, lon };
+  if (!marker) {
+    const a = anchorIcon();
+    const el = pin(a.color, a.icon);
+    marker = new maplibregl.Marker({ element: el, draggable: true }).setLngLat([lon, lat]).addTo(map);
+    marker.on('drag', () => {
+      const p = marker.getLngLat(); work = { lat: p.lat, lon: p.lng };
+      solve({ preview: true });
+    });
+    marker.on('dragend', () => {
+      const p = marker.getLngLat(); work = { lat: p.lat, lon: p.lng };
+      solve();
+    });
+  } else marker.setLngLat([lon, lat]);
+  $('#modeRow').style.display = '';
+  setMode('home');
+  solve();
+}
+
+/* --- worker --- */
+const worker = new Worker('./worker.js', { type: 'module' });
+worker.postMessage({ type: 'load', base: './data' });
+
+worker.onmessage = ev => {
+  const m = ev.data;
+  if (m.type === 'loaded') {
+    meta = m.meta; ready = true;
+    const d = meta.date, ds = `${d.slice(6,8)}.${d.slice(4,6)}.${d.slice(0,4)}`;
+    $('#status').innerHTML =
+      `aikataulut <b>${ds}</b> (${meta.weekday})<br>` +
+      `${meta.nStops.toLocaleString('fi')} pysäkkiä · ${meta.nConn.toLocaleString('fi')} yhteyttä<br>` +
+      (meta.hasWalk ? `kävelyrasteri ${(meta.walkCells / 1e6).toFixed(1)} M ruutua<br>`
+                    : `<span class="warn">kävelyrasteri puuttuu</span><br>`) +
+      (meta.hasWays ? `katuverkko ${meta.nWays.toLocaleString('fi')} väylää<br>`
+                    : `<span class="warn">katuverkko puuttuu — aja build uudelleen</span><br>`) +
+      `kävelyreititys: ${/OK/.test(meta.probe || '') ? '<b>' + meta.probe + '</b>'
+                        : '<span class="warn">' + (meta.probe || '?') + '</span>'}<br>` +
+      (meta.hasRail ? `rataverkko ${meta.nRailWays.toLocaleString('fi')} osuutta<br>`
+                    : `<span class="warn">rataverkko puuttuu — aja build uudelleen</span><br>`) +
+      `Napauta karttaa asettaaksesi työpaikan.`;
+    loadWays('./data')
+      .then(n => { $('#status').innerHTML += `<br>${n.toLocaleString('fi')} väylää vektorina`; updateLines(); })
+      .catch(e => { $('#status').innerHTML += `<br><span class="warn">viivat: ${e.message}</span>`; });
+    if (pending) solve();
+  } else if (m.type === 'result') {
+    if (m.empty) {
+      $('#status').innerHTML = `<span class="warn">${m.empty}</span>`;
+      clearIso(); releaseWorker(); return;
+    }
+    draw(m);
+    releaseWorker();
+    // työpaikan siirto mitätöi vanhan reitin -> lasketaan se heti uudelleen
+    if (home) worker.postMessage({ type: 'itinerary', lat: home.lat, lon: home.lon });
+  } else if (m.type === 'itinerary') {
+    drawTrip(m);
+  } else if (m.type === 'error') {
+    $('#status').innerHTML = `<span class="warn">Virhe: ${m.message}</span>`;
+    releaseWorker();
+  }
+};
+
+/* --- piirto --- */
+const cv = $('#isoCanvas');
+function clearIso() {
+  if (map.getLayer('iso')) map.removeLayer('iso');
+  if (map.getSource('iso')) map.removeSource('iso');
+}
+
+/* ---------- vektoriviivat ---------- */
+const VZ = 11.5;            // taman yli piirretaan oikeat viivat rasterin sijaan
+const MAXFEAT = 14000;
+let ways = null, lastRes = null;
+
+async function loadWays(base) {
+  const v = meta && meta.ver ? '?v=' + meta.ver : '';
+  const b = async (n, T) => {
+    const r = await fetch(`${base}/${n}${v}`);
+    if (!r.ok) throw new Error(`${n}: HTTP ${r.status}`);
+    return new T(await r.arrayBuffer());
+  };
+  const [start, ax, ay, dx, dy] = await Promise.all([
+    b('way_start.bin', Uint32Array), b('way_ax.bin', Int32Array),
+    b('way_ay.bin', Int32Array), b('way_dx.bin', Int16Array), b('way_dy.bin', Int16Array)
+  ]);
+  // vaylakohtaiset rajat nopeaa nakymarajausta varten
+  const n = ax.length;
+  const bx0 = new Int32Array(n), bx1 = new Int32Array(n),
+        by0 = new Int32Array(n), by1 = new Int32Array(n);
+  for (let k = 0; k < n; k++) {
+    let x = ax[k], y = ay[k], mnx = 2e9, mny = 2e9, mxx = -2e9, mxy = -2e9;
+    for (let j = start[k]; j < start[k + 1]; j++) {
+      x += dx[j]; y += dy[j];
+      if (x < mnx) mnx = x; if (x > mxx) mxx = x;
+      if (y < mny) mny = y; if (y > mxy) mxy = y;
+    }
+    bx0[k] = mnx; bx1[k] = mxx; by0[k] = mny; by1[k] = mxy;
+  }
+  ways = { start, ax, ay, dx, dy, n, bx0, bx1, by0, by1 };
+  return n;
+}
+
+function ensureLineLayers() {
+  if (map.getSource('isoline')) return;
+  map.addSource('isoline', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({
+    id: 'isoline-case', type: 'line', source: 'isoline', minzoom: VZ,
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: {
+      'line-color': '#0B1417',
+      'line-opacity': 0.4,
+      'line-width': ['interpolate', ['linear'], ['zoom'], 11.5, 1.5, 14, 3.5, 17, 7.5]
+    }
+  }, under());
+  map.addLayer({
+    id: 'isoline', type: 'line', source: 'isoline', minzoom: VZ,
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: {
+      'line-color': '#5FD3C4',
+      'line-opacity': 0.4,
+      'line-width': ['interpolate', ['linear'], ['zoom'], 11.5, 0.7, 14, 2, 17, 5]
+    }
+  }, under());
+}
+
+function updateLines(preview) {
+  if (!ways || !lastRes || map.getZoom() < VZ) return;
+  const cap = MAXFEAT;
+  ensureLineLayers();
+
+  const r = lastRes;
+  const maxT = +$('#maxT').value * 60;
+  const nb = Math.max(1, Math.round(maxT / 300));
+  const cols = bandColors(nb);
+
+  // nakymän rajat mercatorissa, pienellä marginaalilla
+  const bb = map.getBounds();
+  const pad = (lonToMercX(bb.getEast()) - lonToMercX(bb.getWest())) * 0.15;
+  const vx0 = lonToMercX(bb.getWest()) - pad, vx1 = lonToMercX(bb.getEast()) + pad;
+  const vy0 = latToMercY(bb.getSouth()) - pad, vy1 = latToMercY(bb.getNorth()) + pad;
+
+  const timeAt = (x, y) => {
+    const i = Math.floor((x - r.mercX0) / r.mercCell);
+    const j = Math.floor((y - r.mercY0) / r.mercCell);
+    if (i < 0 || i >= r.w || j < 0 || j >= r.h) return -1;
+    const v = r.grid[j * r.w + i];
+    return isFinite(v) && v <= maxT ? v : -1;
+  };
+
+  const feats = [];
+  const W = ways;
+  outer:
+  for (let k = 0; k < W.n; k++) {
+    if (W.bx1[k] < vx0 || W.bx0[k] > vx1 || W.by1[k] < vy0 || W.by0[k] > vy1) continue;
+    let x = W.ax[k], y = W.ay[k];
+    let run = null, runB = -1;
+    for (let j = W.start[k]; j < W.start[k + 1]; j++) {
+      x += W.dx[j]; y += W.dy[j];
+      const t = timeAt(x, y);
+      const b = t < 0 ? -1 : Math.min(nb - 1, Math.floor(t / maxT * nb));
+      const ll = [mercXToLon(x), mercYToLat(y)];
+      if (b < 0) {
+        if (run && run.length > 1) feats.push({ type: 'Feature', properties: { b: runB }, geometry: { type: 'LineString', coordinates: run } });
+        run = null; runB = -1;
+        continue;
+      }
+      if (!run) { run = [ll]; runB = b; continue; }
+      if (b !== runB) {
+        run.push(ll);
+        if (run.length > 1) feats.push({ type: 'Feature', properties: { b: runB }, geometry: { type: 'LineString', coordinates: run } });
+        if (feats.length >= cap) break outer;
+        run = [ll]; runB = b;
+        continue;
+      }
+      run.push(ll);
+    }
+    if (run && run.length > 1) feats.push({ type: 'Feature', properties: { b: runB }, geometry: { type: 'LineString', coordinates: run } });
+    if (feats.length >= cap) break;
+  }
+
+  const match = ['match', ['get', 'b']];
+  for (let i = 0; i < nb; i++) match.push(i, cols[i]);
+  match.push(cols[nb - 1]);
+  map.setPaintProperty('isoline', 'line-color', match);
+  map.getSource('isoline').setData({ type: 'FeatureCollection', features: feats });
+}
+
+const R_E = 6378137;
+const lonToMercX = lon => R_E * lon * Math.PI / 180;
+const latToMercY = lat => R_E * Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360));
+const mercXToLon = x => x / R_E * 180 / Math.PI;
+const mercYToLat = y => (2 * Math.atan(Math.exp(y / R_E)) - Math.PI / 2) * 180 / Math.PI;
+
+let lt = null;
+map.on('moveend', () => { clearTimeout(lt); lt = setTimeout(updateLines, 60); });
+
+function draw(r) {
+  if (!map.isStyleLoaded()) { map.once('idle', () => draw(r)); return; }
+  const maxT = +$('#maxT').value * 60;
+  const nb = Math.max(1, Math.round(maxT / 300));
+  const cols = bandColors(nb).map(hex2rgb);
+
+  cv.width = r.w; cv.height = r.h;
+  const ctx = cv.getContext('2d');
+  const img = ctx.createImageData(r.w, r.h);
+  const px = img.data;
+
+  for (let j = 0; j < r.h; j++) {
+    // ruudukon rivi 0 = etelä, kuvan rivi 0 = pohjoinen
+    const src = (r.h - 1 - j) * r.w, dst = j * r.w;
+    for (let i = 0; i < r.w; i++) {
+      const o = (dst + i) * 4;
+      if (!r.road[src + i]) { px[o+3] = 0; continue; }   // vain varsinaiset tiet
+      const v = r.grid[src + i];
+      if (!isFinite(v) || v > maxT) { px[o+3] = 0; continue; }
+      const b = Math.min(nb - 1, Math.floor(v / maxT * nb));
+      const c = cols[b];
+      px[o] = c[0]; px[o+1] = c[1]; px[o+2] = c[2]; px[o+3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  lastRes = r;
+
+  const [W, N, E, S] = r.bounds;
+  clearIso();
+  map.addSource('iso', {
+    type: 'canvas', canvas: 'isoCanvas', animate: false,
+    coordinates: [[W, N], [E, N], [E, S], [W, S]]
+  });
+  map.addLayer({ id: 'iso', type: 'raster', source: 'iso', maxzoom: VZ,
+    paint: { 'raster-opacity': 0.4, 'raster-resampling': 'nearest', 'raster-fade-duration': 0 }
+  }, under());
+
+  $('#status').innerHTML =
+    (r.noStops
+      ? `<span class="warn">ei pysäkkejä työpaikan lähellä</span> · <b>${r.km2}</b> km² kävellen<br>`
+      : `<b>${r.reachableStops.toLocaleString('fi')}</b> pysäkkiä · <b>${r.km2}</b> km² tavoitettavissa<br>`) +
+    `<b>${r.runs}</b> saapumisaika${r.runs === 1 ? '' : 'a'} · laskenta <b>${r.ms} ms</b><br>` +
+    `kävely katuverkkoa pitkin`;
+  updateLines(r.preview);
+}
+
+function modeColor(rt) {
+  for (let i = 0; i < MODE_COLORS.length; i += 2) if (MODE_COLORS[i] === rt) return MODE_COLORS[i + 1];
+  return BUS_COLOR;
+}
+const hhmm = t => `${String(Math.floor(t / 3600) % 24).padStart(2, '0')}.${String(Math.floor(t / 60) % 60).padStart(2, '0')}`;
+
+function ensureRouteLayers() {
+  if (map.getSource('route')) return;
+  map.addSource('route', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({
+    id: 'route-case', type: 'line', source: 'route',
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: {
+      'line-color': '#081114', 'line-opacity': 1,
+      'line-width': ['interpolate', ['linear'], ['zoom'], 9, 6, 14, 11, 17, 18]
+    }
+  });
+  map.addLayer({
+    id: 'route-walk', type: 'line', source: 'route',
+    filter: ['==', ['get', 'mode'], 'walk'],
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: {
+      'line-color': '#EDF3F4', 'line-opacity': 1, 'line-dasharray': [0.4, 1.7],
+      'line-width': ['interpolate', ['linear'], ['zoom'], 9, 3, 14, 5.5, 17, 9]
+    }
+  });
+  map.addLayer({
+    id: 'route-transit', type: 'line', source: 'route',
+    filter: ['==', ['get', 'mode'], 'transit'],
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: {
+      'line-color': ['coalesce', ['get', 'color'], BUS_COLOR], 'line-opacity': 1,
+      'line-width': ['interpolate', ['linear'], ['zoom'], 9, 3.5, 14, 6.5, 17, 11]
+    }
+  });
+  map.addLayer({
+    id: 'route-stops', type: 'circle', source: 'route',
+    filter: ['==', ['geometry-type'], 'Point'],
+    paint: {
+      'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 3, 14, 5.5, 17, 8],
+      'circle-color': '#0F1A1E',
+      'circle-stroke-color': ['coalesce', ['get', 'color'], '#EDF3F4'], 'circle-stroke-width': 2
+    }
+  });
+}
+
+function clearRoute() {
+  if (map.getSource('route')) map.getSource('route').setData({ type: 'FeatureCollection', features: [] });
+}
+
+function drawRoute(geom) {
+  if (!geom || !geom.length) { clearRoute(); return; }
+  ensureRouteLayers();
+  const feats = [];
+  for (const g of geom) {
+    if (!g.coords || g.coords.length < 2) continue;
+    const col = g.mode === 'transit' ? routeColor(g.rt, g.line)
+              : (g.exact === false ? '#FF5C5C' : '#EDF3F4');
+    feats.push({ type: 'Feature',
+      properties: { mode: g.mode, rt: g.rt == null ? 3 : g.rt, color: col },
+      geometry: { type: 'LineString', coordinates: g.coords } });
+    if (g.mode === 'transit') {
+      for (const c of g.coords) feats.push({ type: 'Feature', properties: { color: col }, geometry: { type: 'Point', coordinates: c } });
+    }
+  }
+  map.getSource('route').setData({ type: 'FeatureCollection', features: feats });
+}
+
+function drawTrip(m) {
+  const el = $('#trip');
+  if (m.empty) {
+    el.innerHTML = `<div class="thead"><span class="s warn">${m.empty}</span></div>`;
+    clearRoute(); return;
+  }
+  drawRoute(m.geometry);
+
+  let h = `<div class="thead"><span class="t">${Math.round(m.total / 60)} min</span>` +
+          `<span class="s">${m.walkOnly ? 'pelkkä kävely' : 'lähtö ' + hhmm(m.leave) + ' · perillä ' + hhmm(m.arriveBy)}</span></div>`;
+
+  if (m.walkOnly) {
+    el.innerHTML = h + `<div class="leg"><span class="tm">—</span>` +
+      `<span class="pill walk">${Math.round(m.total / 60)}′</span>` +
+      `<span class="d">Kävele koko matka<br><small>katuverkkoa pitkin, ei joukkoliikennettä</small></span></div>`;
+    return;
+  }
+
+  h += `<div class="leg"><span class="tm">${hhmm(m.leave)}</span>` +
+       `<span class="pill walk">${Math.round(m.firstWalk / 60)}′</span>` +
+       `<span class="d">Kävele pysäkille <small>${m.firstStop}</small></span></div>`;
+
+  for (const L of m.legs) {
+    if (L.mode === 'walk') {
+      h += `<div class="leg"><span class="tm">${hhmm(L.dep)}</span>` +
+           `<span class="pill walk">${Math.max(1, Math.round(L.sec / 60))}′</span>` +
+           `<span class="d">${L.last ? 'Kävele työpaikalle' : 'Vaihto'} ` +
+           `<small>${L.last ? 'perillä ' + hhmm(L.arr) : L.toName}</small></span></div>`;
+    } else {
+      const col = routeColor(L.rt, L.line);
+      h += `<div class="leg"><span class="tm">${hhmm(L.dep)}</span>` +
+           `<span class="pill" style="background:${col}">${L.line}</span>` +
+           `<span class="d">${L.kind}${L.head ? ' → ' + L.head : ''}<br>` +
+           `<small>${L.fromName} → ${L.toName}, ${hhmm(L.arr)}</small></span></div>`;
+    }
+  }
+  el.innerHTML = h;
+}
+
+/* --- ohjaimet --- */
+let busy = false, queued = null;
+
+function solve(opts) {
+  if (!work) return;
+  if (!ready) { pending = true; return; }
+  const preview = !!(opts && opts.preview);
+  const secs = v => { const [h, m] = v.split(':').map(Number); return h * 3600 + m * 60; };
+  let a0 = secs($('#arrFrom').value), a1 = secs($('#arrTo').value);
+  if (a1 < a0) [a0, a1] = [a1, a0];
+
+  const msg = {
+    type: 'solve', preview,
+    lat: work.lat, lon: work.lon,
+    arriveFrom: a0, arriveTo: a1, step: 300,
+    direction: dir,
+    maxTransfers,
+    maxTravel: +$('#maxT').value * 60,
+    walkMps: +$('#spd').value / 3.6,
+    maxWalkSec: +$('#walk').value * 60,
+    minTransfer: 120
+  };
+
+  if (busy) { queued = msg; return; }   // uusin korvaa jonossa olevan
+  busy = true;
+  worker.postMessage(msg);
+}
+
+function releaseWorker() {
+  busy = false;
+  if (queued) { const q = queued; queued = null; busy = true; worker.postMessage(q); }
+}
+
+function legend() {
+  const maxT = +$('#maxT').value;
+  const nb = Math.max(1, Math.round(maxT / 5));
+  const cols = bandColors(nb);
+  const el = $('#legend');
+  el.innerHTML = '';
+  // näytetään enintään 9 nappia, muuten liian tiheä kännykällä
+  const step = Math.ceil(nb / 9);
+  for (let i = step - 1; i < nb; i += step) {
+    const mins = Math.round((i + 1) / nb * maxT);
+    const b = document.createElement('button');
+    b.style.background = cols[i];
+    b.textContent = mins;
+    b.title = `${mins} min`;
+    b.setAttribute('aria-pressed', String(mins === maxT));
+    b.onclick = () => { $('#maxT').value = mins; sync(); solve(); };
+    el.appendChild(b);
+  }
+}
+
+function sync() {
+  const secs = v => { const [h, m] = v.split(':').map(Number); return h * 3600 + m * 60; };
+  const n = Math.max(1, Math.floor(Math.abs(secs($('#arrTo').value) - secs($('#arrFrom').value)) / 300) + 1);
+  $('#vRuns').textContent = `${n} lähtöä`;
+  $('#vMax').textContent = $('#maxT').value + ' min';
+  $('#vSpd').textContent = (+$('#spd').value).toFixed(1).replace('.', ',') + ' km/h';
+  $('#vWalk').textContent = $('#walk').value + ' min';
+  legend();
+}
+
+/* --- paneelin kahva --- */
+(() => {
+  const panel = $('#panel'), grab = $('#grab');
+  const MIN = 44;
+  let y0 = 0, base = 0, maxH = 0, dragging = false, moved = 0, want = 0, raf = 0;
+
+  // Korkeus asetetaan pikseleina ja tahdistetaan requestAnimationFramella.
+  // scrollHeight luetaan vain kertaalleen vedon alussa: sen lukeminen kesken
+  // vedon pakottaa uudelleenladonnan, mika oli sen nykimisen syy.
+  const apply = () => {
+    raf = 0;
+    panel.style.height = Math.round(Math.min(maxH, Math.max(MIN, want))) + 'px';
+  };
+  const queue = v => { want = v; if (!raf) raf = requestAnimationFrame(apply); };
+
+  const settle = expanded => {
+    panel.style.transition = '';
+    panel.classList.toggle('min', !expanded);
+    panel.style.height = '';
+    panel.style.overflow = '';
+  };
+
+  grab.addEventListener('pointerdown', e => {
+    if (innerWidth >= 760) return;
+    e.preventDefault();
+    const r = panel.getBoundingClientRect();
+    maxH = Math.min(panel.scrollHeight, innerHeight * 0.66);
+    base = r.height;
+    y0 = e.clientY; moved = 0; dragging = true;
+    panel.style.transition = 'none';
+    panel.style.overflow = 'hidden';
+    panel.style.height = Math.round(base) + 'px';
+    grab.setPointerCapture(e.pointerId);
+  }, { passive: false });
+
+  grab.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    const d = e.clientY - y0;
+    if (Math.abs(d) > moved) moved = Math.abs(d);
+    queue(base - d);
+  });
+
+  const end = () => {
+    if (!dragging) return;
+    dragging = false;
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+    if (moved < 8) { settle(panel.classList.contains('min')); return; }
+    settle(Math.min(maxH, Math.max(MIN, want)) > (MIN + maxH) / 2);
+  };
+  grab.addEventListener('pointerup', end);
+  grab.addEventListener('pointercancel', end);
+  grab.addEventListener('lostpointercapture', end);
+  grab.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); settle(panel.classList.contains('min')); }
+  });
+})();
+
+let t = null;
+const debounce = () => { clearTimeout(t); t = setTimeout(() => solve({ preview: true }), 60); };
+for (const id of ['#maxT', '#spd', '#walk']) {
+  $(id).addEventListener('input', () => { sync(); debounce(); });
+  $(id).addEventListener('change', () => { sync(); solve(); });
+}
+for (const id of ['#arrFrom', '#arrTo']) $(id).addEventListener('change', () => { sync(); solve(); });
+sync();
+</script>
+</body>
+</html>
