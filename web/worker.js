@@ -108,21 +108,26 @@ async function load(base) {
 
   // Rataprobe: etsitaan ensimmainen raideliikenteen yhteys ja yritetaan
   // reitittaa se rataverkkoa pitkin.
-  let railProbe = railWays ? 'ei raideliikennettä datassa' : 'rataverkkoa ei ladattu';
+  let railProbe = railWays ? '' : 'rataverkkoa ei ladattu';
   if (railWays) {
-    for (let i = 0; i < D.TRIP.length; i++) {
+    // Testataan jokainen raidemuoto erikseen: ratikka, metro ja juna kayttavat
+    // eri bittia, joten yksi epaonnistuminen ei kerro muista mitaan.
+    const kinds = { 2: 'ratikka', 5: 'metro', 1: 'juna' };
+    const done = {};
+    for (let i = 0; i < D.TRIP.length && Object.keys(done).length < 3; i++) {
       const rt = D.routeType[D.tripRoute[D.TRIP[i]]];
       const mk = railMask(rt);
-      if (!mk) continue;
+      if (!mk || done[mk]) continue;
       const a = D.FROM[i], b2 = D.TO[i];
       if (a === b2) continue;
       const r = SV.routeOnWays(railWays,
         merc([D.lon[a], D.lat[a]]), merc([D.lon[b2], D.lat[b2]]), mk, 3);
-      railProbe = r
-        ? `OK (rt ${rt}, maski ${mk}, ${r.coords.length} pistettä)`
-        : `EPÄONNISTUI (rt ${rt}, maski ${mk}) — rataa ei löydy pysäkkien läheltä`;
-      break;
+      done[mk] = r ? `${kinds[mk] || mk} OK` : `${kinds[mk] || mk} EI`;
     }
+    const vals = Object.values(done);
+    railProbe = vals.length
+      ? (vals.every(v => /OK$/.test(v)) ? 'OK ' : '') + vals.join(', ')
+      : 'ei raideliikennettä datassa';
   }
 
   return { ...meta, ver: VER, hasWalk: !!walk, walkCells: walk ? walk.w * walk.h : 0,
