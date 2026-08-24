@@ -200,13 +200,13 @@ export function buildGridWalk(D, transit, walk, o) {
     let i = Math.round((x - mercX0) / mercCell);
     let j = Math.round((y - mercY0) / mercCell);
     if (i >= 0 && i < gw && j >= 0 && j < gh) {
-      if (!ok[j * gw + i]) {
+      if (!(ok[j * gw + i] & 2)) {
         let found = false;
-        for (let r = 1; r <= 4 && !found; r++) {
+        for (let r = 1; r <= 5 && !found; r++) {
           for (let dj = -r; dj <= r && !found; dj++) for (let di = -r; di <= r; di++) {
             const jj = j + dj, ii = i + di;
             if (jj < 0 || jj >= gh || ii < 0 || ii >= gw) continue;
-            if (ok[jj * gw + ii]) { i = ii; j = jj; found = true; break; }
+            if (ok[jj * gw + ii] & 2) { i = ii; j = jj; found = true; break; }
           }
         }
         if (found) { push(j * gw + i, 0, -1); originSeeded = true; }
@@ -220,13 +220,13 @@ export function buildGridWalk(D, transit, walk, o) {
     let i = Math.round((x - mercX0) / mercCell);
     let j = Math.round((y - mercY0) / mercCell);
     if (i < 0 || i >= gw || j < 0 || j >= gh) continue;
-    if (!ok[j * gw + i]) {
+    if (!(ok[j * gw + i] & 2)) {
       let found = false;
-      for (let r = 1; r <= 3 && !found; r++) {
+      for (let r = 1; r <= 4 && !found; r++) {
         for (let dj = -r; dj <= r && !found; dj++) for (let di = -r; di <= r; di++) {
           const jj = j + dj, ii = i + di;
           if (jj < 0 || jj >= gh || ii < 0 || ii >= gw) continue;
-          if (ok[jj * gw + ii]) { i = ii; j = jj; found = true; break; }
+          if (ok[jj * gw + ii] & 2) { i = ii; j = jj; found = true; break; }
         }
       }
       if (!found) continue;
@@ -252,7 +252,7 @@ export function buildGridWalk(D, transit, walk, o) {
           if (!di && !dj) continue;
           const ii = i + di; if (ii < 0 || ii >= gw) continue;
           const nc = jj * gw + ii;
-          if (!ok[nc]) continue;
+          if (!(ok[nc] & 2)) continue;          // vain oikeat tiet
           const nd = d + ((di && dj) ? cDia : cOrt);
           if (st >= 0 && nd - st > maxWalkSec) continue;
           push(nc, nd, st);
@@ -260,6 +260,28 @@ export function buildGridWalk(D, transit, walk, o) {
       }
     }
     buckets[d] = null;
+  }
+
+  // Korttelien sisäosat: yksi levityskierros tulokseen. Reititys pysyy
+  // teillä, mutta talon ovelle pääsee tieltä pienellä lisäajalla.
+  const spread = Math.round(cellM / walkMps) + 20;
+  const base = dist.slice();
+  for (let j = 0; j < gh; j++) {
+    for (let i = 0; i < gw; i++) {
+      const c = j * gw + i;
+      if (base[c] >= 0 || !ok[c]) continue;
+      let bestD = -1, bestS = 0;
+      for (let dj = -1; dj <= 1; dj++) {
+        const jj = j + dj; if (jj < 0 || jj >= gh) continue;
+        for (let di = -1; di <= 1; di++) {
+          const ii = i + di; if (ii < 0 || ii >= gw) continue;
+          const n = jj * gw + ii;
+          if (base[n] < 0) continue;
+          if (bestD < 0 || base[n] < bestD) { bestD = base[n]; bestS = seedT[n]; }
+        }
+      }
+      if (bestD >= 0 && bestD + spread <= CAP) { dist[c] = bestD + spread; seedT[c] = bestS; }
+    }
   }
 
   let i0 = gw, i1 = -1, j0 = gh, j1 = -1;
@@ -363,7 +385,7 @@ export function csaWindow(D, o) {
 /* ------------------------------------------------------------------ */
 
 /** Ruudun indeksi koordinaateista, tarvittaessa lähimpään kuljettavaan napsautettuna. */
-export function cellIndex(walk, lon, lat, snap = 3, grid = null, mask = 0xff) {
+export function cellIndex(walk, lon, lat, snap = 3, grid = null, mask = 2) {
   const ok = grid || walk.grid;
   const { w: gw, h: gh, mercX0, mercY0, mercCell } = walk;
   let i = Math.round((lonToMerc(lon) - mercX0) / mercCell);
@@ -386,7 +408,7 @@ export function cellIndex(walk, lon, lat, snap = 3, grid = null, mask = 0xff) {
  * Rajattu Dial-haku yhdestä ruudusta. Palauttaa Mapin ruutu -> sekuntia.
  * Harva esitys, koska säde on pieni (satoja ruutuja).
  */
-export function walkNetwork(walk, startCell, maxSec, walkMps, withPrev = false, mask = 0xff) {
+export function walkNetwork(walk, startCell, maxSec, walkMps, withPrev = false, mask = 2) {
   const { grid: ok, w: gw, h: gh, cellM } = walk;
   if (startCell < 0) return null;
   const cOrt = Math.max(1, Math.round(cellM / walkMps));

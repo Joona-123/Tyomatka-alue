@@ -52,14 +52,18 @@ async function load(base) {
       stopCell[s] = SV.cellIndex(walk, D.lon[s], D.lat[s], 3);
     }
     try {
-      const rg = await bin(base, 'rail_grid.bin', Uint8Array);
-      railWalk = { ...wm, grid: rg };
-    } catch { railWalk = null; }
+      const rg = await bin(base, 'rail_grid.bin', Uint8Array, 2);
+      let cells = 0;
+      for (let i = 0; i < rg.length; i++) if (rg[i]) cells++;
+      railWalk = cells > 0 ? { ...wm, grid: rg } : null;
+      meta.railCellCount = cells;
+    } catch (e) { railWalk = null; meta.railError = String(e.message || e); }
   } catch (e) {
     walk = null; stopCell = null;
     meta.walkError = String(e.message || e);
   }
-  return { ...meta, hasWalk: !!walk, walkCells: walk ? walk.w * walk.h : 0 };
+  return { ...meta, hasWalk: !!walk, walkCells: walk ? walk.w * walk.h : 0,
+           hasRail: !!railWalk };
 }
 
 // GTFS route_type. Perusarvot 0-12, laajennetut 100-1700.
@@ -114,23 +118,29 @@ function railMask(rt) {
 /** Ajo-osuus rataverkkoa pitkin, pysakkivali kerrallaan. */
 function railGeom(stops, mask) {
   if (!railWalk || !mask) return null;
+  const ll = s => [D.lon[s], D.lat[s]];
   const out = [];
+  let hits = 0;
   for (let k = 0; k + 1 < stops.length; k++) {
     const a = stops[k], b = stops[k + 1];
-    const ca = SV.cellIndex(railWalk, D.lon[a], D.lat[a], 6, railWalk.grid, mask);
-    const cb = SV.cellIndex(railWalk, D.lon[b], D.lat[b], 6, railWalk.grid, mask);
-    if (ca < 0 || cb < 0) return null;
-    // kustannus 1 / ruutu -> maksimi on ruutumaarana, ei sekunteina
-    const dx = Math.abs((ca % railWalk.w) - (cb % railWalk.w));
-    const dy = Math.abs(((ca / railWalk.w) | 0) - ((cb / railWalk.w) | 0));
-    const cap = Math.max(40, Math.round((dx + dy) * 3));
-    const net = SV.walkNetwork(railWalk, ca, cap, railWalk.cellM, true, mask);
-    const p = net && SV.walkPath(railWalk, net, cb);
-    if (!p || p.length < 2) return null;
-    if (out.length) p.shift();
-    out.push(...p);
+    let seg = null;
+    const ca = SV.cellIndex(railWalk, D.lon[a], D.lat[a], 8, railWalk.grid, mask);
+    const cb = SV.cellIndex(railWalk, D.lon[b], D.lat[b], 8, railWalk.grid, mask);
+    if (ca >= 0 && cb >= 0) {
+      // kustannus 1 / ruutu -> katto on ruutumaara, ei sekunteja
+      const dx = Math.abs((ca % railWalk.w) - (cb % railWalk.w));
+      const dy = Math.abs(((ca / railWalk.w) | 0) - ((cb / railWalk.w) | 0));
+      const cap = Math.max(60, Math.round((dx + dy) * 4));
+      const net = SV.walkNetwork(railWalk, ca, cap, railWalk.cellM, true, mask);
+      const p = net && SV.walkPath(railWalk, net, cb);
+      if (p && p.length >= 2) { seg = p; hits++; }
+    }
+    // yksittainen epaonnistuminen ei enaa pudota koko osuutta suoraksi
+    if (!seg) seg = [ll(a), ll(b)];
+    if (out.length) seg = seg.slice(1);
+    out.push(...seg);
   }
-  return out.length >= 2 ? out : null;
+  return hits > 0 && out.length >= 2 ? out : null;
 }
 
 /** Koko matkan geometria: kavelyt verkkoa pitkin, ajo-osuudet pysakkiketjuna. */

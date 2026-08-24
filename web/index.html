@@ -210,6 +210,23 @@ let marker = null, work = null, meta = null, ready = false, pending = false;
 
 const ICON_HOME = '<path d="M12 3.2 3.6 10.1v10.7h6.1v-6h4.6v6h6.1V10.1z"/>';
 const ICON_WORK = '<path d="M9.4 3.4h5.2q1.1 0 1.1 1.1v1.8h3.6q1.2 0 1.2 1.2v11q0 1.2-1.2 1.2H4.7q-1.2 0-1.2-1.2v-11q0-1.2 1.2-1.2h3.6V4.5q0-1.1 1.1-1.1m.9 2.9h3.4V5.2h-3.4z"/>';
+const ICON_PIN = '<path d="M12 2.6a6.7 6.7 0 0 0-6.7 6.7c0 5 6.7 12.1 6.7 12.1s6.7-7.1 6.7-12.1A6.7 6.7 0 0 0 12 2.6m0 9.3a2.6 2.6 0 1 1 0-5.2 2.6 2.6 0 0 1 0 5.2"/>';
+
+// Ankkuri = piste josta lasketaan. Töihin-suunnassa se on työpaikka,
+// Kotoa pois -suunnassa koti. Kuvakkeen on vastattava sitä.
+const anchorIcon = () => dir === 'toWork'
+  ? { color: '#E8A33D', icon: ICON_WORK }
+  : { color: '#5FD3C4', icon: ICON_HOME };
+const probeIcon = () => dir === 'toWork'
+  ? { color: '#5FD3C4', icon: ICON_HOME }
+  : { color: '#E8A33D', icon: ICON_PIN };
+
+function restyle(marker, spec) {
+  if (!marker) return;
+  const el = marker.getElement();
+  el.style.background = spec.color;
+  el.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="#0B1417">' + spec.icon + '</svg>';
+}
 
 function pin(color, icon) {
   const el = document.createElement('div');
@@ -230,6 +247,8 @@ function setDir(d) {
   $('#lTime').textContent = d === 'toWork' ? 'Perillä välillä' : 'Lähtö välillä';
   $('#mWork').textContent = d === 'toWork' ? 'Työpaikan' : 'Kodin';
   $('#mHome').textContent = d === 'toWork' ? 'Kodin' : 'Määränpään';
+  restyle(marker, anchorIcon());
+  restyle(homeMarker, probeIcon());
   $('#hint').innerHTML = d === 'toWork'
     ? 'Napauta karttaa: <b>työpaikka</b>'
     : 'Napauta karttaa: <b>koti</b>';
@@ -259,7 +278,8 @@ $('#mHome').onclick = () => setMode('home');
 function setHome(lat, lon) {
   home = { lat, lon };
   if (!homeMarker) {
-    const el = pin('#5FD3C4', ICON_HOME);
+    const pr = probeIcon();
+    const el = pin(pr.color, pr.icon);
     homeMarker = new maplibregl.Marker({ element: el, draggable: true }).setLngLat([lon, lat]).addTo(map);
     const upd = () => {
       const p = homeMarker.getLngLat();
@@ -275,7 +295,8 @@ function setHome(lat, lon) {
 function setWork(lat, lon) {
   work = { lat, lon };
   if (!marker) {
-    const el = pin('#E8A33D', ICON_WORK);
+    const a = anchorIcon();
+    const el = pin(a.color, a.icon);
     marker = new maplibregl.Marker({ element: el, draggable: true }).setLngLat([lon, lat]).addTo(map);
     marker.on('drag', () => {
       const p = marker.getLngLat(); work = { lat: p.lat, lon: p.lng };
@@ -305,6 +326,8 @@ worker.onmessage = ev => {
       `${meta.nStops.toLocaleString('fi')} pysäkkiä · ${meta.nConn.toLocaleString('fi')} yhteyttä<br>` +
       (meta.hasWalk ? `kävelyrasteri ${(meta.walkCells / 1e6).toFixed(1)} M ruutua<br>`
                     : `<span class="warn">kävelyrasteri puuttuu</span><br>`) +
+      (meta.hasRail ? `rataverkko ${(meta.railCellCount / 1000).toFixed(0)} k ruutua<br>`
+                    : `<span class="warn">rataverkko puuttuu — aja build uudelleen</span><br>`) +
       `Napauta karttaa asettaaksesi työpaikan.`;
     loadWays('./data')
       .then(n => { $('#status').innerHTML += `<br>${n.toLocaleString('fi')} väylää vektorina`; updateLines(); })
