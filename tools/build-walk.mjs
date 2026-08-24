@@ -31,6 +31,7 @@ if (!SEQ || !OUT || !BBOX) {
 
 const CELL_M = parseInt(process.env.CELL_M || '50', 10);
 const DILATE = parseInt(process.env.DILATE || '1', 10);
+const SIMPLIFY_M = parseFloat(process.env.SIMPLIFY_M || '6');   // Douglas-Peucker, metria
 
 const [W, S, E, N] = BBOX.split(',').map(Number);
 const PAD = 0.03;   // astetta marginaalia reunoille
@@ -54,6 +55,65 @@ console.log(`Ruudukko ${gw} x ${gh} (${CELL_M} m), ${(gw * gh / 1e6).toFixed(2)}
 if (gw * gh > 40e6) { console.error('VIRHE: ruudukko liian iso, kasvata CELL_M.'); process.exit(1); }
 
 const g = new Uint8Array(gw * gh);
+
+/* --- vektorigeometria piirtoa varten --- */
+const wayStart = [0];
+const AX = [], AY = [], DX = [], DY = [];
+const TOL = SIMPLIFY_M * kMerc;
+
+function simplify(pts, tol) {
+  if (pts.length < 3) return pts;
+  const keep = new Uint8Array(pts.length);
+  keep[0] = keep[pts.length - 1] = 1;
+  const stack = [[0, pts.length - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop();
+    if (b - a < 2) continue;
+    const ax = pts[a][0], ay = pts[a][1], bx = pts[b][0], by = pts[b][1];
+    const ex = bx - ax, ey = by - ay;
+    const len2 = ex * ex + ey * ey;
+    let bi = -1, bd = tol;
+    for (let i = a + 1; i < b; i++) {
+      const px = pts[i][0] - ax, py = pts[i][1] - ay;
+      let d;
+      if (len2 === 0) d = Math.hypot(px, py);
+      else {
+        let t = (px * ex + py * ey) / len2;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        d = Math.hypot(px - t * ex, py - t * ey);
+      }
+      if (d > bd) { bd = d; bi = i; }
+    }
+    if (bi < 0) continue;
+    keep[bi] = 1;
+    stack.push([a, bi], [bi, b]);
+  }
+  const out = [];
+  for (let i = 0; i < pts.length; i++) if (keep[i]) out.push(pts[i]);
+  return out;
+}
+
+function pushWay(pts) {
+  const sp = simplify(pts, TOL);
+  if (sp.length < 2) return;
+  let px = Math.round(sp[0][0]), py = Math.round(sp[0][1]);
+  AX.push(px); AY.push(py);
+  DX.push(0); DY.push(0);
+  for (let i = 1; i < sp.length; i++) {
+    const nx = Math.round(sp[i][0]), ny = Math.round(sp[i][1]);
+    let ddx = nx - px, ddy = ny - py;
+    // Int16 ei riita hyvin pitkiin suoriin -> pilkotaan
+    while (Math.abs(ddx) > 32000 || Math.abs(ddy) > 32000) {
+      const f = Math.min(32000 / (Math.abs(ddx) || 1), 32000 / (Math.abs(ddy) || 1));
+      const mx = px + Math.round(ddx * f), my = py + Math.round(ddy * f);
+      DX.push(mx - px); DY.push(my - py);
+      px = mx; py = my; ddx = nx - px; ddy = ny - py;
+    }
+    DX.push(ddx); DY.push(ddy);
+    px = nx; py = ny;
+  }
+  wayStart.push(DX.length);
+}
 
 /* --- sallitut tietyypit --- */
 const OK = new Set(['footway', 'path', 'pedestrian', 'steps', 'living_street',
@@ -103,9 +163,9 @@ for await (let ln of rl) {
   const parts = geom.type === 'LineString' ? [geom.coordinates]
     : geom.type === 'MultiLineString' ? geom.coordinates : [];
   for (const co of parts) {
-    for (let k = 0; k + 1 < co.length; k++) {
-      line(toX(co[k][0]), toY(co[k][1]), toX(co[k + 1][0]), toY(co[k + 1][1]));
-    }
+    const mp = co.map(c => [toX(c[0]), toY(c[1])]);
+    for (let k = 0; k + 1 < mp.length; k++) line(mp[k][0], mp[k][1], mp[k + 1][0], mp[k + 1][1]);
+    pushWay(mp);
   }
   nUsed++;
 }
@@ -142,6 +202,22 @@ const meta = {
   mercX0: x0, mercY0: y0, mercCell: cell,
   walkableFraction: on / g.length, roadCells: road
 };
+// vektoriviivat
+const nWaysOut = AX.length;
+const wb = (name, ta) => {
+  fs.writeFileSync(path.join(OUT, name), Buffer.from(ta.buffer, ta.byteOffset, ta.byteLength));
+  return ta.byteLength;
+};
+let vb = 0;
+vb += wb('way_start.bin', Uint32Array.from(wayStart));
+vb += wb('way_ax.bin', Int32Array.from(AX));
+vb += wb('way_ay.bin', Int32Array.from(AY));
+vb += wb('way_dx.bin', Int16Array.from(DX));
+vb += wb('way_dy.bin', Int16Array.from(DY));
+meta.nWays = nWaysOut;
+meta.nVerts = DX.length;
+console.log(`Vektoriviivoja: ${nWaysOut} vaylaa, ${DX.length} pistetta, ${(vb / 1048576).toFixed(1)} MB`);
+
 fs.writeFileSync(path.join(OUT, 'walk_meta.json'), JSON.stringify(meta, null, 2));
 console.log(`walk_grid.bin ${(g.byteLength / 1048576).toFixed(1)} MB`);
 console.log(JSON.stringify(meta, null, 2));
