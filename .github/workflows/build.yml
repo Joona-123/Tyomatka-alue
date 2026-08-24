@@ -57,9 +57,16 @@ jobs:
 
       - name: Poimi kulkuvaylat
         run: |
-          osmium tags-filter tmp/hsl.osm.pbf w/highway -o tmp/hw.osm.pbf --overwrite
+          osmium tags-filter tmp/hsl.osm.pbf w/highway w/railway -o tmp/hw.osm.pbf --overwrite
           osmium export tmp/hw.osm.pbf -f geojsonseq -i flex_mem --geometry-types=linestring -o tmp/hw.geojsonseq --overwrite
           wc -l tmp/hw.geojsonseq
+          RAILS=$(grep -c '"railway"' tmp/hw.geojsonseq || true)
+          echo "railway-tagillisia vaylia: $RAILS"
+          if [ "${RAILS:-0}" -lt 100 ]; then
+            echo "VIRHE: OSM-syotteessa ei ole rautatieaineistoa."
+            echo "Tarkista etta tags-filter sisaltaa w/railway ja etta lahde-pbf kattaa radat."
+            exit 1
+          fi
 
       - name: Rasteroi kavelyverkko
         run: |
@@ -67,10 +74,13 @@ jobs:
           echo "bbox = $BBOX"
           node --max-old-space-size=6144 tools/build-walk.mjs tmp/hw.geojsonseq web/data "$BBOX"
 
+      - name: Laske vaihdot katuverkosta
+        run: node --max-old-space-size=6144 tools/build-transfers.mjs web/data tmp/hsl
+
       - name: Tarkista tulos
         run: |
           ls -lh web/data
-          for f in conn_dep.bin stops.json routes.json trips.json walk_grid.bin walk_meta.json; do
+          for f in conn_dep.bin stops.json routes.json trips.json walk_grid.bin walk_meta.json way_start.bin way_dx.bin conn_seq.bin way_kind.bin rway_start.bin rway_kind.bin; do
             test -s "web/data/$f" || { echo "PUUTTUU: $f"; exit 1; }
           done
           du -sh web/data
@@ -81,3 +91,4 @@ jobs:
           path: web
       - id: deploy
         uses: actions/deploy-pages@v4
+      
