@@ -138,7 +138,7 @@
 
   <div class="grp">
     <div class="lbl"><span>Kävelynopeus</span><span class="val" id="vSpd">4,5 km/h</span></div>
-    <input type="range" id="spd" min="3" max="6" step="0.1" value="4.5">
+    <input type="range" id="spd" min="3" max="10" step="0.1" value="4.5">
   </div>
 
   <div class="grp">
@@ -665,8 +665,8 @@ function drawTrip(m) {
   drawRoute(m.geometry);
 
   const veh = (m.legs || []).filter(L => L.mode === 'transit').length;
-  const vtxt = m.walkOnly ? 'pelkkä kävely'
-    : `${veh} kulkuväline${veh === 1 ? '' : 'ttä'} · ${Math.max(0, veh - 1)} vaihtoa`;
+  const vtxt = (m.walkOnly || veh === 0) ? 'pelkkä kävely'
+    : `${veh} kulkuväline${veh === 1 ? '' : 'ttä'} · ${veh - 1} vaihtoa`;
   let h = `<div class="thead"><span class="t">${Math.round(m.total / 60)} min</span>` +
           `<span class="s">${vtxt}</span></div>` +
           (m.walkOnly ? '' : `<div class="sub">lähtö ${hhmm(m.leave)} · perillä ${hhmm(m.arriveBy)}</div>`);

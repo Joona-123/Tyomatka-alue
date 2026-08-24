@@ -1,6 +1,7 @@
 import * as SV from './solver.js';
 
 let D = null, meta = null, walk = null, ti = null, stopCell = null;
+let MERCK = 2;
 let walkWays = null, railWays = null;
 let last = null;   // viimeisin ratkaisu matkaehdotusta varten
 
@@ -58,6 +59,7 @@ async function load(base) {
     const wm = await json(base, 'walk_meta.json');
     const wg = await bin(base, 'walk_grid.bin', Uint8Array);
     walk = { ...wm, grid: wg };
+    MERCK = wm.kMerc || (1 / Math.cos((wm.lat0 || 60) * Math.PI / 180));
     stopCell = new Int32Array(D.nStops);
     for (let s = 0; s < D.nStops; s++) {
       stopCell[s] = SV.cellIndex(walk, D.lon[s], D.lat[s], 3);
@@ -198,6 +200,42 @@ function routeGeometry(legs, homeLL, workLL, walkMps, firstWalkSec) {
   return segs;
 }
 
+/**
+ * Lahto- ja tuloaika suoraan osuuksista. Palauttaa ok=false jos tulos ei ole
+ * jarkeva, jolloin kayttoliittyma nayttaa virheen eika vaarnaa lukua.
+ */
+function legSpan(legs, leadWalkSec, tailSec) {
+  if (!legs.length) return { ok: false, total: 0, leave: 0, arrive: 0 };
+  let dep = Infinity, arr = -Infinity;
+  for (const L of legs) {
+    if (Number.isFinite(L.dep) && L.dep < dep) dep = L.dep;
+    if (Number.isFinite(L.arr) && L.arr > arr) arr = L.arr;
+  }
+  if (!Number.isFinite(dep) || !Number.isFinite(arr)) {
+    return { ok: false, total: 0, leave: 0, arrive: 0 };
+  }
+  const leave = dep - (leadWalkSec || 0);
+  const arrive = arr + (tailSec || 0);
+  const total = arrive - leave;
+  return { ok: total >= 0 && total <= 24 * 3600, total, leave, arrive };
+}
+
+/**
+ * Suora kavelymatka pisteesta pisteeseen katuverkkoa pitkin, sekunteina.
+ * Haetaan vain jos linnuntie edes mahtuu kavelybudjettiin - muuten aliverkon
+ * rakentaminen olisi turhaa tyota.
+ */
+function directWalkSec(fromLL, toLL, walkMps, maxWalkSec) {
+  if (!walkWays) return -1;
+  const a = merc(fromLL), b2 = merc(toLL);
+  const straightM = Math.hypot(b2[0] - a[0], b2[1] - a[1]) / MERCK;
+  if (straightM > maxWalkSec * walkMps * 1.6) return -1;
+  const r = SV.routeOnWays(walkWays, a, b2, 0, 3);
+  if (!r) return -1;
+  const sec = Math.round((r.merc / MERCK) / walkMps);
+  return sec <= maxWalkSec ? sec : -1;
+}
+
 self.onmessage = async (e) => {
   const m = e.data;
   try {
@@ -264,23 +302,31 @@ self.onmessage = async (e) => {
       const effMps = last.walkMps * 0.75;
       const W = last.win;
 
-      // Pelkkä kävely: lue ruudukosta, jolloin aika on katuverkon mukainen.
-      let walkTotal = -1;
-      const G = last.grid;
-      if (G) {
-        const i = Math.floor((SV.lonToMerc(m.lon) - G.mercX0) / G.mercCell);
-        const j = Math.floor((SV.latToMerc(m.lat) - G.mercY0) / G.mercCell);
-        if (i >= 0 && i < G.w && j >= 0 && j < G.h) {
-          const c = j * G.w + i;
-          if (G.walkOnly[c] && isFinite(G.grid[c])) walkTotal = G.grid[c];
-        }
-      }
-
       const wt = walk
         ? SV.stopWalkTimes(D, walk, stopCell, m.lat, m.lon, last.maxWalkSec, last.walkMps)
         : SV.nearbyStops(D, m.lat, m.lon, last.maxWalkSec, effMps);
       const b = SV.bestOriginNet(W.transit, wt, last.maxTravel,
                                  W.walkUsed, last.maxWalkSec);
+
+      // Jos koko matkan voi kavella, pysakin kautta kiertaminen on aina
+      // turhaa: kolmioepayhtalon nojalla suora verkkoreitti on lyhyempi.
+      const homeLL = [m.lon, m.lat], workLL = [last.lon, last.lat];
+      const dw = directWalkSec(homeLL, workLL, last.walkMps, last.maxWalkSec);
+      const walkOnlyMsg = () => {
+        const arr = last.forward ? W.times[0] + dw : W.times[W.times.length - 1];
+        const dep = last.forward ? W.times[0] : arr - dw;
+        return {
+          type: 'itinerary', walkOnly: true,
+          legs: [{ mode: 'walk', last: true, fromStop: -1, toStop: -1,
+                   fromName: 'koti', toName: 'työpaikka',
+                   dep, arr: dep + dw, sec: dw }],
+          firstWalk: 0, firstStop: null,
+          leave: dep, arriveBy: dep + dw, total: dw,
+          geometry: [{ mode: 'walk', coords: walkGeom(homeLL, workLL),
+                       exact: lastWalkExact }]
+        };
+      };
+      if (dw >= 0 && (!b || dw <= b.total)) { self.postMessage(walkOnlyMsg()); return; }
 
       if (last.forward && b) {
         // Kotoa ulos: b.stop on MAALIpysakki, kavely siita napautettuun pisteeseen
@@ -292,11 +338,19 @@ self.onmessage = async (e) => {
             dep: r.arrival, arr: r.arrival + b.walkSec, sec: b.walkSec
           }]);
           const named = nameLegs(legs);
+          if (dw >= 0 && !named.some(L => L.mode === 'transit')) {
+            self.postMessage(walkOnlyMsg()); return;
+          }
+          const span = legSpan(named, r.firstWalk, 0);
+          if (!span.ok) {
+            self.postMessage({ type: 'itinerary',
+              empty: `Matkan purku tuotti kelvottoman ajan (${Math.round(span.total / 60)} min).` });
+            return;
+          }
           self.postMessage({
             type: 'itinerary', legs: named,
             firstWalk: r.firstWalk, firstStop: D.name[r.firstStop],
-            leave: r.departure, arriveBy: r.arrival + b.walkSec,
-            total: r.arrival + b.walkSec - r.departure,
+            leave: span.leave, arriveBy: span.arrive, total: span.total,
             geometry: routeGeometry(named, [last.lon, last.lat], [m.lon, m.lat],
                                     last.walkMps, r.firstWalk)
           });
@@ -304,33 +358,26 @@ self.onmessage = async (e) => {
         }
       }
 
-      if (walkTotal >= 0 && (!b || walkTotal <= b.total)) {
-        const arr = W.times[W.times.length - 1];
-        self.postMessage({
-          type: 'itinerary', walkOnly: true,
-          legs: [{ mode: 'walk', last: true, fromStop: -1, toStop: -1,
-                   fromName: 'koti', toName: 'työpaikka',
-                   dep: arr - walkTotal, arr, sec: walkTotal }],
-          firstWalk: 0, firstStop: null,
-          leave: arr - walkTotal, arriveBy: arr, total: walkTotal,
-          geometry: [{ mode: 'walk',
-            coords: walkGeom([m.lon, m.lat], [last.lon, last.lat]),
-            exact: lastWalkExact }]
-        });
-        return;
-      }
-
       if (!b) { self.postMessage({ type: 'itinerary', empty: 'Tänne ei ehdi annetussa ajassa.' }); return; }
       const k = W.winner[b.stop];
       const r = SV.reconstruct(D, W.runs[k], ti, b.stop, { arriveBy: W.times[k] });
       if (!r) { self.postMessage({ type: 'itinerary', empty: 'Matkan purku epäonnistui.' }); return; }
-      const leave = r.departure - b.walkSec;
       const named = nameLegs(r.legs);
+      if (dw >= 0 && !named.some(L => L.mode === 'transit')) {
+        self.postMessage(walkOnlyMsg()); return;
+      }
+      const span = legSpan(named, b.walkSec, 0);
+      if (!span.ok) {
+        self.postMessage({ type: 'itinerary',
+          empty: `Matkan purku tuotti kelvottoman ajan (${Math.round(span.total / 60)} min).` });
+        return;
+      }
+      const leave = span.leave;
       self.postMessage({
         type: 'itinerary',
         legs: named,
         firstWalk: b.walkSec, firstStop: D.name[b.stop],
-        leave, arriveBy: r.arrival, total: r.arrival - leave,
+        leave, arriveBy: span.arrive, total: span.total,
         geometry: routeGeometry(named, [m.lon, m.lat], [last.lon, last.lat], last.walkMps, b.walkSec)
       });
       return;
