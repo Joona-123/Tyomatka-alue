@@ -769,6 +769,7 @@ export function reconstructForward(D, res, ti, to, o) {
   const legs = rev.reverse();
   const w0 = sourceWalk[s] >= 0 ? sourceWalk[s] : 0;
   return { legs, firstWalk: w0, firstStop: s,
+           ok: isSource[s] === 1,       // false = purku katkesi kesken
            departure: res.departAt, arrival: E[(nLevels - 1) * nStops + to] };
 }
 
