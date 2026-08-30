@@ -201,7 +201,9 @@ function routeGeometry(legs, homeLL, workLL, walkMps, firstWalkSec) {
     if (L.mode === 'walk') {
       const to = L.last ? workLL : ll(L.toStop);
       const c = walkGeom(cursor, to);
-      segs.push({ mode: 'walk', coords: c, exact: mark() });
+      const sec = Math.round(polyMeters(c) / walkMps);
+      if (leadSec < 0 && !L.last) leadSec = sec;
+      segs.push({ mode: 'walk', coords: c, exact: mark(), sec });
       cursor = to;
     } else {
       const chain = (L.path && L.path.length > 1) ? L.path : [L.fromStop, L.toStop];
@@ -222,7 +224,7 @@ function routeGeometry(legs, homeLL, workLL, walkMps, firstWalkSec) {
       cursor = pts[pts.length - 1];
     }
   }
-  return segs;
+  return { segs, leadSec: leadSec < 0 ? 0 : leadSec };
 }
 
 /**
@@ -256,6 +258,16 @@ function legSpan(legs, leadWalkSec, tailSec) {
  * Haetaan vain jos linnuntie edes mahtuu kavelybudjettiin - muuten aliverkon
  * rakentaminen olisi turhaa tyota.
  */
+/** Piirretyn viivan pituus todellisina metreina. */
+function polyMeters(coords) {
+  let L = 0;
+  for (let i = 1; i < coords.length; i++) {
+    const a = merc(coords[i - 1]), b = merc(coords[i]);
+    L += Math.hypot(b[0] - a[0], b[1] - a[1]);
+  }
+  return L / MERCK;
+}
+
 /** Kavelyaika katuverkkoa pitkin, ilman budjettirajaa. -1 jos ei reittia. */
 function walkSecBetween(fromLL, toLL, walkMps) {
   if (!walkWays) return -1;
@@ -362,7 +374,7 @@ self.onmessage = async (e) => {
           firstWalk: 0, firstStop: null,
           leave: dep, arriveBy: dep + dw, total: dw,
           geometry: [{ mode: 'walk', coords: walkGeom(homeLL, workLL),
-                       exact: lastWalkExact }]
+                       exact: lastWalkExact, sec: dw }]
         };
       };
       if (dw >= 0 && (!b || dw <= b.total)) { self.postMessage(walkOnlyMsg()); return; }
@@ -397,6 +409,13 @@ self.onmessage = async (e) => {
               empty: 'Tänne pääsee vain kävellen, eikä kävelybudjetti riitä.' });
             return;
           }
+          const geoF = routeGeometry(named, homeLL2, [m.lon, m.lat], last.walkMps, lead);
+          if (geoF.leadSec > 0) lead = geoF.leadSec;
+          if (lead > last.maxWalkSec * 1.5) {
+            self.postMessage({ type: 'itinerary',
+              empty: `Lähtöpysäkille on ${Math.round(lead / 60)} min kävelyä — yli budjetin.` });
+            return;
+          }
           const span = legSpan(named, lead, 0);
           if (!span.ok) {
             self.postMessage({ type: 'itinerary',
@@ -408,7 +427,7 @@ self.onmessage = async (e) => {
             firstWalk: lead, firstStop: D.name[r.firstStop],
             leave: span.leave, arriveBy: span.arrive, total: span.total,
             walkSec: span.walk, rideSec: span.ride, waitSec: span.wait,
-            geometry: routeGeometry(named, homeLL2, [m.lon, m.lat], last.walkMps, lead)
+            geometry: geoF.segs
           });
           return;
         }
@@ -426,7 +445,17 @@ self.onmessage = async (e) => {
           empty: 'Tänne pääsee vain kävellen, eikä kävelybudjetti riitä.' });
         return;
       }
-      const span = legSpan(named, b.walkSec, 0);
+      const geo = routeGeometry(named, [m.lon, m.lat], [last.lon, last.lat],
+                                last.walkMps, b.walkSec);
+      // Naytettava luku johdetaan SAMASTA viivasta joka piirretaan, joten
+      // "0 min" ja kilometrien mittainen viiva eivat voi enaa esiintya yhdessa.
+      const lead = geo.leadSec || b.walkSec;
+      if (lead > last.maxWalkSec * 1.5) {
+        self.postMessage({ type: 'itinerary',
+          empty: `Lähtöpysäkille on ${Math.round(lead / 60)} min kävelyä — yli budjetin.` });
+        return;
+      }
+      const span = legSpan(named, lead, 0);
       if (!span.ok) {
         self.postMessage({ type: 'itinerary',
           empty: `Matkan purku tuotti kelvottoman ajan (${Math.round(span.total / 60)} min).` });
@@ -436,10 +465,10 @@ self.onmessage = async (e) => {
       self.postMessage({
         type: 'itinerary',
         legs: named,
-        firstWalk: b.walkSec, firstStop: D.name[b.stop],
+        firstWalk: lead, firstStop: D.name[b.stop],
         leave, arriveBy: span.arrive, total: span.total,
         walkSec: span.walk, rideSec: span.ride, waitSec: span.wait,
-        geometry: routeGeometry(named, [m.lon, m.lat], [last.lon, last.lat], last.walkMps, b.walkSec)
+        geometry: geo.segs
       });
       return;
     }
