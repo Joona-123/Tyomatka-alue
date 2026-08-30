@@ -1,0 +1,64 @@
+{
+  "comment": "Alueet. bbox = lansi,etela,ita,pohjoinen. optional:true = lataus saa epaonnistua ilman etta build kaatuu.",
+  "national": [
+    { "id": "vr", "url": "https://rata.digitraffic.fi/api/v1/trains/gtfs-passenger-stops.zip", "optional": true }
+  ],
+  "regions": [
+    {
+      "id": "hsl",
+      "name": "Helsingin seutu",
+      "bbox": [24.20, 59.90, 25.70, 60.60],
+      "feeds": [
+        { "id": "hsl", "url": "https://infopalvelut.storage.hsldev.com/gtfs/hsl.zip" }
+      ]
+    },
+    {
+      "id": "tampere",
+      "name": "Tampereen seutu",
+      "bbox": [23.30, 61.30, 24.30, 61.75],
+      "feeds": [
+        { "id": "nysse", "url": "", "optional": true }
+      ]
+    },
+    {
+      "id": "turku",
+      "name": "Turun seutu",
+      "bbox": [21.90, 60.30, 22.60, 60.70],
+      "feeds": [
+        { "id": "foli", "url": "", "optional": true }
+      ]
+    },
+    {
+      "id": "oulu",
+      "name": "Oulun seutu",
+      "bbox": [25.00, 64.75, 26.20, 65.20],
+      "feeds": [
+        { "id": "osl", "url": "", "optional": true }
+      ]
+    },
+    {
+      "id": "jyvaskyla",
+      "name": "Jyväskylän seutu",
+      "bbox": [25.35, 62.05, 26.10, 62.45],
+      "feeds": [
+        { "id": "linkki", "url": "", "optional": true }
+      ]
+    },
+    {
+      "id": "kuopio",
+      "name": "Kuopion seutu",
+      "bbox": [27.30, 62.75, 28.00, 63.10],
+      "feeds": [
+        { "id": "vilkku", "url": "http://karttapalvelu.kuopio.fi/google_transit/google_transit.zip", "optional": true }
+      ]
+    },
+    {
+      "id": "lahti",
+      "name": "Lahden seutu",
+      "bbox": [25.40, 60.85, 26.00, 61.15],
+      "feeds": [
+        { "id": "lsl", "url": "", "optional": true }
+      ]
+    }
+  ]
+}
