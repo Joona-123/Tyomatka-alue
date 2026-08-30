@@ -1,4 +1,13 @@
-import * as SV from './solver.js';
+// Koodi haetaan versioidulla osoitteella, jotta selain ei tarjoile vanhaa
+// worker.js:aa tai solver.js:aa paivityksen jalkeen. Datatiedostoilla on oma
+// versiointinsa build-tunnisteen mukaan.
+const CODEV = (() => {
+  try { return new URL(self.location.href).searchParams.get('v') || ''; }
+  catch { return ''; }
+})();
+let SV = null;
+const svReady = import('./solver.js' + (CODEV ? '?v=' + CODEV : ''))
+  .then(m => { SV = m; });
 
 let D = null, meta = null, walk = null, ti = null, stopCell = null;
 let MERCK = 2;
@@ -196,6 +205,7 @@ function routeGeometry(legs, homeLL, workLL, walkMps, firstWalkSec) {
   const ll = s => [D.lon[s], D.lat[s]];
   let cursor = homeLL;
   let lead = firstWalkSec || 900;
+  let leadSec = -1;                 // alkukavely mitattuna piirretysta viivasta
 
   for (const L of legs) {
     if (L.mode === 'walk') {
@@ -211,7 +221,11 @@ function routeGeometry(legs, homeLL, workLL, walkMps, firstWalkSec) {
       // kavely kursorista nousupysakille, jos valissa on matkaa
       const board = pts[0];
       if (cursor && (Math.abs(cursor[0] - board[0]) > 1e-6 || Math.abs(cursor[1] - board[1]) > 1e-6)) {
-        segs.push({ mode: 'walk', coords: walkGeom(cursor, board) });
+        const cw = walkGeom(cursor, board);
+        const ws = Math.round(polyMeters(cw) / walkMps);
+        if (leadSec < 0) leadSec = ws;
+        segs.push({ mode: 'walk', coords: cw, exact: mark(), sec: ws });
+        lead = 900;
       }
       const rails = railGeom(chain, railMask(L.rt));
       segs.push({
@@ -290,6 +304,7 @@ function directWalkSec(fromLL, toLL, walkMps, maxWalkSec) {
 self.onmessage = async (e) => {
   const m = e.data;
   try {
+    if (!SV) await svReady;
     if (m.type === 'load') {
       self.postMessage({ type: 'loaded', meta: await load(m.base) });
       return;

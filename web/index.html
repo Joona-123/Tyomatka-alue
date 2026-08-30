@@ -50,6 +50,8 @@
     font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin-bottom:5px}
   .val{font-family:var(--mono);font-size:13px;color:var(--ink);letter-spacing:0}
   input[type=range]{width:100%;accent-color:var(--accent);margin:0}
+  select{width:100%;font-size:14px;background:#16262B;color:var(--ink);
+    border:1px solid var(--line);border-radius:6px;padding:8px}
   input[type=time]{font-family:var(--mono);font-size:15px;background:#16262B;color:var(--ink);
     border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:100%}
   .tw{display:flex;gap:8px;align-items:center}
@@ -100,6 +102,11 @@
 
 <div id="panel">
   <div id="grab" role="button" tabindex="0" aria-label="Näytä tai piilota asetukset"></div>
+
+  <div class="grp" id="regionRow" style="display:none">
+    <div class="lbl"><span>Alue</span></div>
+    <select id="region"></select>
+  </div>
 
   <div class="grp">
     <div class="lbl"><span>Laskentasuunta</span></div>
@@ -347,6 +354,11 @@ function setHome(lat, lon) {
 }
 
 function setWork(lat, lon) {
+  // Jos piste on toisen alueen sisalla, vaihdetaan aineisto automaattisesti.
+  if (regions.length > 1 && (!region || !inBox(region.bbox || [-180, -90, 180, 90], lat, lon))) {
+    const r = regions.find(x => inBox(x.bbox, lat, lon));
+    if (r) loadRegion(r);
+  }
   work = { lat, lon };
   if (!marker) {
     const a = anchorIcon();
@@ -367,8 +379,39 @@ function setWork(lat, lon) {
 }
 
 /* --- worker --- */
-const worker = new Worker('./worker.js', { type: 'module' });
-worker.postMessage({ type: 'load', base: './data' });
+// Koodin versiointi: estaa selainta ajamasta vanhaa worker/solver-paria.
+const CODEV = Date.now();
+const worker = new Worker('./worker.js?v=' + CODEV, { type: 'module' });
+
+let regions = [], region = null;
+
+const inBox = (b, lat, lon) => lon >= b[0] && lon <= b[2] && lat >= b[1] && lat <= b[3];
+
+function loadRegion(r) {
+  if (!r || (region && r.id === region.id)) return;
+  region = r;
+  ready = false; busy = false; queued = null; ways = null; lastRes = null;
+  clearIso(); clearRoute();
+  $('#region').value = r.id;
+  $('#status').textContent = `Ladataan aluetta ${r.name}…`;
+  worker.postMessage({ type: 'load', base: './data/' + r.id });
+}
+
+// regions.json puuttuu vanhoista buildeista -> pudotaan yhteen alueeseen
+fetch('./data/regions.json', { cache: 'no-cache' })
+  .then(r => r.ok ? r.json() : Promise.reject())
+  .then(list => {
+    regions = list;
+    const sel = $('#region');
+    sel.innerHTML = list.map(r => `<option value="${r.id}">${r.name}</option>`).join('');
+    sel.onchange = () => {
+      const r = regions.find(x => x.id === sel.value);
+      if (r) { loadRegion(r); map.fitBounds([[r.bbox[0], r.bbox[1]], [r.bbox[2], r.bbox[3]]], { padding: 30 }); }
+    };
+    if (list.length > 1) $('#regionRow').style.display = '';
+    loadRegion(list[0]);
+  })
+  .catch(() => { region = { id: '', name: 'oletus' }; worker.postMessage({ type: 'load', base: './data' }); });
 
 worker.onmessage = ev => {
   const m = ev.data;
@@ -376,6 +419,7 @@ worker.onmessage = ev => {
     meta = m.meta; ready = true;
     const d = meta.date, ds = `${d.slice(6,8)}.${d.slice(4,6)}.${d.slice(0,4)}`;
     $('#status').innerHTML =
+      (region && region.name ? `<b>${region.name}</b> · ` : '') +
       `aikataulut <b>${ds}</b> (${meta.weekday})<br>` +
       `${meta.nStops.toLocaleString('fi')} pysäkkiä · ${meta.nConn.toLocaleString('fi')} yhteyttä<br>` +
       (meta.hasWalk ? `kävelyrasteri ${(meta.walkCells / 1e6).toFixed(1)} M ruutua<br>`
@@ -392,7 +436,7 @@ worker.onmessage = ev => {
       (meta.hasRail ? `rataverkko ${meta.nRailWays.toLocaleString('fi')} osuutta<br>`
                     : `<span class="warn">rataverkko puuttuu — aja build uudelleen</span><br>`) +
       `Napauta karttaa asettaaksesi työpaikan.`;
-    loadWays('./data')
+    loadWays('./data' + (region && region.id ? '/' + region.id : ''))
       .then(n => { $('#status').innerHTML += `<br>${n.toLocaleString('fi')} väylää vektorina`; updateLines(); })
       .catch(e => { $('#status').innerHTML += `<br><span class="warn">viivat: ${e.message}</span>`; });
     if (pending) solve();
@@ -691,7 +735,11 @@ function drawTrip(m) {
     : `${veh} kulkuväline${veh === 1 ? '' : 'ttä'} · ${veh - 1} vaihtoa`;
   let h = `<div class="thead"><span class="t">${Math.round(m.total / 60)} min</span>` +
           `<span class="s">${vtxt}</span></div>` +
-          (m.walkOnly ? '' : `<div class="sub">lähtö ${hhmm(m.leave)} · perillä ${hhmm(m.arriveBy)}</div>`);
+          (m.walkOnly ? '' :
+            `<div class="sub">lähtö ${hhmm(m.leave)} · perillä ${hhmm(m.arriveBy)}</div>` +
+            `<div class="sub">kävely ${Math.round((m.walkSec || 0) / 60)} min · ` +
+            `ajo ${Math.round((m.rideSec || 0) / 60)} min · ` +
+            `odotus ${Math.round((m.waitSec || 0) / 60)} min</div>`);
 
   if (m.walkOnly) {
     el.innerHTML = h + `<div class="leg"><span class="tm">—</span>` +
