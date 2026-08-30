@@ -19,7 +19,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 90
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
@@ -30,6 +30,7 @@ jobs:
       FOOT_M: 400
       CELL_M: 50
       DILATE: 1
+      OSM_BBOX: "24.20,59.90,25.70,60.60"
 
     steps:
       - uses: actions/checkout@v4
@@ -38,111 +39,55 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Lataa HSL GTFS
+        run: |
+          mkdir -p tmp/hsl
+          curl -sSfL --retry 3 --retry-delay 5 -o tmp/hsl.zip https://infopalvelut.storage.hsldev.com/gtfs/hsl.zip
+          unzip -oq tmp/hsl.zip -d tmp/hsl
+          ls -lh tmp/hsl
+
+      - name: Rakenna aikataulupaketti
+        run: node --max-old-space-size=6144 tools/build-data.mjs tmp/hsl web/data hsl
+
       - name: Asenna osmium
         run: sudo apt-get update -qq && sudo apt-get install -y -qq osmium-tool
 
-      - name: Lataa Suomen OSM-aineisto
+      - name: Lataa ja rajaa OSM-aineisto
         run: |
-          mkdir -p tmp
           curl -sSfL --retry 3 --retry-delay 10 -o tmp/finland.osm.pbf https://download.geofabrik.de/europe/finland-latest.osm.pbf
           ls -lh tmp/finland.osm.pbf
-          osmium fileinfo tmp/finland.osm.pbf | head -20
+          osmium extract -b "$OSM_BBOX" tmp/finland.osm.pbf -o tmp/reg.osm.pbf --overwrite
+          ls -lh tmp/reg.osm.pbf
 
-      - name: Lataa valtakunnalliset GTFS-syotteet
+      - name: Poimi kulkuvaylat
         run: |
-          node -e '
-            const r = require("./tools/regions.json");
-            console.log(r.national.map(f => f.id + " " + f.url).join("\n"));
-          ' > tmp/national.txt
-          mkdir -p tmp/nat
-          while read -r id url; do
-            [ -z "$url" ] && continue
-            mkdir -p "tmp/nat/$id"
-            if curl -sSfL --retry 2 -o "tmp/nat/$id.zip" "$url"; then
-              unzip -oq "tmp/nat/$id.zip" -d "tmp/nat/$id" && echo "OK $id"
-            else
-              echo "VAROITUS: $id ei latautunut, ohitetaan"
-            fi
-          done < tmp/national.txt
+          osmium tags-filter tmp/reg.osm.pbf w/highway w/railway -o tmp/hw.osm.pbf --overwrite
+          osmium export tmp/hw.osm.pbf -f geojsonseq -i flex_mem --geometry-types=linestring -o tmp/hw.geojsonseq --overwrite
+          wc -l tmp/hw.geojsonseq
+          RAILS=$(grep -c '"railway"' tmp/hw.geojsonseq || true)
+          echo "railway-tagillisia vaylia: $RAILS"
+          if [ "${RAILS:-0}" -lt 100 ]; then
+            echo "VIRHE: OSM-syotteessa ei ole rautatieaineistoa."
+            exit 1
+          fi
 
-      - name: Rakenna alueet
+      - name: Rakenna kavely- ja rataverkko
         run: |
-          set -e
-          NAT=$(for d in tmp/nat/*/; do
-                  [ -f "$d/stop_times.txt" ] && printf "%s=%s " "$(basename $d)" "${d%/}"
-                done)
-          echo "Valtakunnalliset: ${NAT:-ei mitaan}"
+          BBOX=$(node -p "JSON.parse(require('fs').readFileSync('web/data/meta.json')).bbox.join(',')")
+          echo "bbox = $BBOX"
+          node --max-old-space-size=6144 tools/build-walk.mjs tmp/hw.geojsonseq web/data "$BBOX"
 
-          node -e '
-            const r = require("./tools/regions.json");
-            for (const g of r.regions) {
-              console.log([g.id, g.bbox.join(","),
-                g.feeds.map(f => f.id + "|" + f.url).join(" ")].join("\t"));
-            }
-          ' > tmp/regions.txt
-
-          BUILT=""
-          while IFS=$'\t' read -r RID BBOX FEEDS; do
-            echo "=============== $RID ==============="
-            rm -rf tmp/r && mkdir -p tmp/r
-            SPECS=""
-            for spec in $FEEDS; do
-              FID="${spec%%|*}"; URL="${spec#*|}"
-              [ -z "$URL" ] && { echo "  $FID: URL puuttuu, ohitetaan"; continue; }
-              mkdir -p "tmp/r/$FID"
-              if curl -sSfL --retry 2 -o "tmp/r/$FID.zip" "$URL"; then
-                unzip -oq "tmp/r/$FID.zip" -d "tmp/r/$FID" && SPECS="$SPECS $FID=tmp/r/$FID"
-              else
-                echo "  VAROITUS: $FID ei latautunut"
-              fi
-            done
-            if [ -z "$SPECS" ]; then echo "  ei aikatauludataa, ohitetaan alue"; continue; fi
-
-            node tools/merge-gtfs.mjs tmp/r/merged $SPECS $NAT
-
-            OUT="web/data/$RID"
-            mkdir -p "$OUT"
-            node --max-old-space-size=6144 tools/build-data.mjs tmp/r/merged "$OUT" "$RID"
-
-            osmium extract -b "$BBOX" tmp/finland.osm.pbf -o tmp/r/reg.osm.pbf --overwrite
-            osmium tags-filter tmp/r/reg.osm.pbf w/highway w/railway -o tmp/r/hw.pbf --overwrite
-            osmium export tmp/r/hw.pbf -f geojsonseq -i flex_mem --geometry-types=linestring -o tmp/r/hw.geojsonseq --overwrite
-            RAILS=$(grep -c '"railway"' tmp/r/hw.geojsonseq || true)
-            echo "  railway-tagillisia vaylia: $RAILS"
-
-            DBOX=$(node -p "JSON.parse(require('fs').readFileSync('$OUT/meta.json')).bbox.join(',')")
-            node --max-old-space-size=6144 tools/build-walk.mjs tmp/r/hw.geojsonseq "$OUT" "$DBOX"
-            node --max-old-space-size=6144 tools/build-transfers.mjs "$OUT" tmp/r/merged
-
-            for f in conn_dep.bin conn_seq.bin stops.json routes.json trips.json \
-                     walk_grid.bin walk_meta.json way_start.bin way_kind.bin \
-                     rway_start.bin rway_kind.bin; do
-              test -s "$OUT/$f" || { echo "PUUTTUU: $RID/$f"; exit 1; }
-            done
-            du -sh "$OUT"
-            BUILT="$BUILT $RID"
-          done < tmp/regions.txt
-
-          echo "Rakennetut alueet:$BUILT"
-          [ -n "$BUILT" ] || { echo "VIRHE: yhtaan aluetta ei rakennettu"; exit 1; }
-
-          node -e '
-            const fs = require("fs");
-            const r = require("./tools/regions.json");
-            const built = process.argv[1].trim().split(/\s+/).filter(Boolean);
-            const out = r.regions.filter(g => built.includes(g.id)).map(g => {
-              const m = JSON.parse(fs.readFileSync("web/data/" + g.id + "/meta.json"));
-              return { id: g.id, name: g.name, bbox: g.bbox, date: m.date,
-                       nStops: m.nStops, nConn: m.nConn };
-            });
-            fs.writeFileSync("web/data/regions.json", JSON.stringify(out, null, 2));
-            console.log(out.map(o => o.id + ": " + o.nStops + " pysakkia").join("\n"));
-          ' "$BUILT"
+      - name: Laske vaihdot katuverkosta
+        run: node --max-old-space-size=6144 tools/build-transfers.mjs web/data tmp/hsl
 
       - name: Tarkista tulos
         run: |
           ls -lh web/data
-          test -s web/data/regions.json
+          for f in conn_dep.bin conn_seq.bin stops.json routes.json trips.json \
+                   walk_grid.bin walk_meta.json way_start.bin way_kind.bin \
+                   rway_start.bin rway_kind.bin; do
+            test -s "web/data/$f" || { echo "PUUTTUU: $f"; exit 1; }
+          done
           du -sh web/data
 
       - uses: actions/configure-pages@v5
