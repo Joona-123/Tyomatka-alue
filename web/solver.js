@@ -743,11 +743,16 @@ export function reconstructForward(D, res, ti, to, o) {
     let k = ti.start[trip];
     while (k < ti.start[trip + 1] && ti.list[k] !== ci) k++;
 
-    const lo = (level - 1) * nStops;
+    // Ajon aikana KAIKKI valipysakit on saavutettu samalla tasolla tata vuoroa
+    // pitkin; nousupysakki on se jolla nain ei ole. Aiemmin tassa katsottiin
+    // tasoa level-1, jolloin ehto ei toteutunut koskaan -> jokainen pysakkivali
+    // luettiin omaksi nousukseen, tasot loppuivat kesken ja purku katkesi
+    // ennen kotia (alun kavely 0 min).
+    const same = level * nStops;
     let m = k;
     while (m > ti.start[trip]) {
       const f = FROM[ti.list[m]];
-      const vc = VC[lo + f];
+      const vc = VC[same + f];
       if (vc >= 0 && TRIP[vc] === trip) m--; else break;
     }
     const bc = ti.list[m];
